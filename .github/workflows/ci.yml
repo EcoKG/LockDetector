@@ -5,6 +5,11 @@ on:
     branches: ['**']
     tags: ['v*']
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Create a GitHub release with this tag (e.g. v1.0.0) from the dispatched commit'
+        required: false
+        default: ''
 
 jobs:
   windows:
@@ -46,10 +51,10 @@ jobs:
           path: results
 
       - name: Package (source + binaries + test results)
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: startsWith(github.ref, 'refs/tags/v') || inputs.release_tag != ''
         shell: pwsh
         run: |
-          $v = '${{ github.ref_name }}'
+          $v = '${{ inputs.release_tag || github.ref_name }}'
           $name = "LockDetector-$v-x64"
           $d = "dist/$name"
           New-Item -ItemType Directory -Force -Path $d, "$d/test-results" | Out-Null
@@ -65,12 +70,14 @@ jobs:
           Get-ChildItem dist/*.zip | ForEach-Object { "{0}  {1:N0} bytes" -f $_.Name, $_.Length }
 
       - name: Create GitHub release
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: startsWith(github.ref, 'refs/tags/v') || inputs.release_tag != ''
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release create '${{ github.ref_name }}' dist/*.zip `
+          $tag = '${{ inputs.release_tag || github.ref_name }}'
+          gh release create $tag dist/*.zip `
             --repo '${{ github.repository }}' `
-            --title 'LockDetector ${{ github.ref_name }}' `
+            --target '${{ github.sha }}' `
+            --title "LockDetector $tag" `
             --notes-file RELEASE_NOTES.md
