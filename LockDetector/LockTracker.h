@@ -13,3 +13,4 @@ void LD_TrackAcquire(void* object, int kind, const char* operation);
 void LD_TrackRelease(void* object, int kind, const char* operation);
 void LD_LogMessage(const char* level, const char* message);
 void LD_SetLogPath(const wchar_t* path);
+void LD_InitializeTracker();

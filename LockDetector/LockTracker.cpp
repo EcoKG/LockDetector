@@ -1,4 +1,5 @@
 #include "LockTracker.h"
+#include "../Common/LockProtocol.h"
 #include <windows.h>
 #include <map>
 #include <vector>
