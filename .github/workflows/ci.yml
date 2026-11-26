@@ -36,6 +36,19 @@ jobs:
         shell: pwsh
         run: ./ci/run_tests.ps1 -BinDir build/bin/Release -OutDir results
 
+      - name: Static-CRT DLL must not depend on the VC runtime
+        shell: pwsh
+        run: |
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -find "VC\Tools\MSVC\**\bin\Hostx64\x64\dumpbin.exe" | Select-Object -First 1
+          Write-Host "dumpbin: $vs"
+          $dep = & $vs /dependents build/bin/static/Release/LockDetector.dll
+          $dep | Write-Host
+          if ($dep -match 'VCRUNTIME|MSVCP|api-ms-win-crt|ucrtbase') { Write-Error 'static DLL still depends on the VC/UCRT runtime'; exit 1 }
+
+      - name: Run scenarios against the static-CRT DLL
+        shell: pwsh
+        run: ./ci/run_tests.ps1 -BinDir build/bin/Release -DllPath build/bin/static/Release/LockDetector.dll -OutDir results_static
+
       - name: Collect link maps
         if: always()
         shell: pwsh
@@ -48,7 +61,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: results
-          path: results
+          path: |
+            results
+            results_static
 
       - name: Package (source + binaries + test results)
         if: startsWith(github.ref, 'refs/tags/v') || inputs.release_tag != ''
@@ -63,6 +78,10 @@ jobs:
             if (Test-Path "$bin/$f") { Copy-Item "$bin/$f" $d } else { Write-Host "missing $f" }
           }
           Copy-Item results/* "$d/test-results" -ErrorAction SilentlyContinue
+          # static-CRT variant: needs only KERNEL32.dll (no VC++ redistributable)
+          New-Item -ItemType Directory -Force -Path "$d/static-crt", "$d/test-results-static-crt" | Out-Null
+          foreach ($f in 'LockDetector.dll','LockDetector.pdb') { Copy-Item "build/bin/static/Release/$f" "$d/static-crt" -ErrorAction SilentlyContinue }
+          Copy-Item results_static/* "$d/test-results-static-crt" -ErrorAction SilentlyContinue
           Copy-Item README.md, ORIGINAL_README.txt $d
           Copy-Item third_party/Detours/LICENSE.md "$d/Detours-LICENSE.md" -ErrorAction SilentlyContinue
           Compress-Archive -Path "$d/*" -DestinationPath "dist/$name-bin.zip"

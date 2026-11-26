@@ -61,3 +61,28 @@ target_compile_definitions(InversionDemo PRIVATE _WIN32_WINNT=0x0601 WIN32_LEAN_
 add_executable(InversionDemoMT Examples/InversionDemo/InversionDemo.cpp)
 target_compile_definitions(InversionDemoMT PRIVATE _WIN32_WINNT=0x0601 WIN32_LEAN_AND_MEAN)
 set_property(TARGET InversionDemoMT PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded")
+
+# ---- static-CRT detector DLL ------------------------------------------------------------------
+# Same sources linked with /MT so the DLL only needs KERNEL32.dll: it can be loaded into
+# processes (e.g. VS2013/v120 applications) on machines without the VC++ 2015-2022 runtime.
+add_library(detours_mt STATIC
+  ${DETOURS_ROOT}/src/creatwth.cpp ${DETOURS_ROOT}/src/detours.cpp ${DETOURS_ROOT}/src/disasm.cpp
+  ${DETOURS_ROOT}/src/image.cpp ${DETOURS_ROOT}/src/modules.cpp ${DETOURS_ROOT}/src/disolx64.cpp
+  ${DETOURS_ROOT}/src/disolx86.cpp ${DETOURS_ROOT}/src/disolia64.cpp ${DETOURS_ROOT}/src/disolarm.cpp
+  ${DETOURS_ROOT}/src/disolarm64.cpp)
+target_include_directories(detours_mt PUBLIC ${DETOURS_ROOT}/src)
+set_property(TARGET detours_mt PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded")
+
+add_library(LockDetectorStatic SHARED
+  LockDetector/LockDetector.cpp LockDetector/LockTracker.cpp LockDetector/LockHooks.cpp
+  LockDetector/LockDetector.def)
+target_compile_definitions(LockDetectorStatic PRIVATE _WIN32_WINNT=0x0601 WIN32_LEAN_AND_MEAN UNICODE _UNICODE)
+target_link_libraries(LockDetectorStatic PRIVATE detours_mt psapi)
+set_target_properties(LockDetectorStatic PROPERTIES
+  OUTPUT_NAME LockDetector
+  MSVC_RUNTIME_LIBRARY "MultiThreaded"
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/static"
+  PDB_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/static")
+if(MSVC)
+  target_link_options(LockDetectorStatic PRIVATE /MAP)
+endif()

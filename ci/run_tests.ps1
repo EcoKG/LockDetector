@@ -2,7 +2,8 @@ param(
     [string]$BinDir = "build/bin/Release",
     [string]$OutDir = "results",
     [switch]$NoFail,
-    [int]$TimeoutSec = 60
+    [int]$TimeoutSec = 60,
+    [string]$DllPath = ""
 )
 # Runs InversionDemo scenarios with/without LockDetector.dll and verifies the
 # detector log. Prints a PASS/FAIL line per check and a benchmark table.
@@ -11,7 +12,7 @@ $BinDir = (Resolve-Path $BinDir).Path
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 $OutDir = (Resolve-Path $OutDir).Path
 $demo = Join-Path $BinDir 'InversionDemo.exe'
-$dll  = Join-Path $BinDir 'LockDetector.dll'
+$dll  = if ($DllPath) { (Resolve-Path $DllPath).Path } else { Join-Path $BinDir 'LockDetector.dll' }
 $script:fails = 0
 $script:summary = New-Object System.Collections.ArrayList
 
