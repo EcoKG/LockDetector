@@ -32,6 +32,21 @@ jobs:
       - name: Build (Release)
         run: cmake --build build --config Release
 
+      - name: Install VC++ 2013 x64 runtime (real msvcp120.dll for the v120 std::mutex tests)
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          if (-not (Test-Path "$env:windir\System32\msvcp120.dll")) {
+            Invoke-WebRequest -Uri 'https://aka.ms/highdpimfc2013x64enu' -OutFile vcredist2013_x64.exe
+            Start-Process .\vcredist2013_x64.exe -ArgumentList '/install','/quiet','/norestart' -Wait
+          }
+          Get-Item "$env:windir\System32\msvcp120.dll","$env:windir\System32\msvcr120.dll" | Format-List FullName,Length,@{n='Version';e={$_.VersionInfo.FileVersion}}
+          $db = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -find "VC\Tools\MSVC\**\bin\Hostx64\x64\dumpbin.exe" | Select-Object -First 1
+          Write-Host '--- msvcp120.dll _Mtx_ exports'
+          & $db /exports "$env:windir\System32\msvcp120.dll" | Select-String '_Mtx_'
+          Write-Host '--- msvcr120.dll Concurrency::critical_section exports'
+          & $db /exports "$env:windir\System32\msvcr120.dll" | Select-String 'critical_section@Concurrency' | Select-Object -First 12
+
       - name: Run scenarios (inversion / deadlock / benchmark)
         shell: pwsh
         run: ./ci/run_tests.ps1 -BinDir build/bin/Release -OutDir results

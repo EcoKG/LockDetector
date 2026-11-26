@@ -289,6 +289,7 @@ template<int M> struct StlMtx {
         RealTimed   = (PFN_MtxTimedLock)GetProcAddress(h, "_Mtx_timedlock");
         RealUnlock  = (PFN_MtxLock)GetProcAddress(h, "_Mtx_unlock");
         RealDestroy = (PFN_MtxDestroy)GetProcAddress(h, "_Mtx_destroy_in_situ");
+        if (!RealDestroy) RealDestroy = (PFN_MtxDestroy)GetProcAddress(h, "_Mtx_destroy");   // VS2012/2013 name
         int n = 0;
         if (RealLock)    { DetourAttach(&(PVOID&)RealLock, Lock); ++n; }
         if (RealTry)     { DetourAttach(&(PVOID&)RealTry, Try); ++n; }
@@ -314,7 +315,7 @@ template<int M> PFN_MtxDestroy StlMtx<M>::RealDestroy = NULL;
 // ---- install / remove -----------------------------------------------------------------------------
 // Detours only fixes up threads it was told about. Register every thread of the process so
 // none of them can be executing inside a function while its first bytes are rewritten.
-static int g_stlAttached[2] = { 0, 0 };
+static int g_stlAttached[4] = { 0, 0, 0, 0 };
 static HANDLE g_updated[1024];
 static int g_updatedCount = 0;
 static void UpdateAllThreads() {
@@ -342,10 +343,11 @@ static void ReleaseUpdatedThreads() {
 }
 
 BOOL LD_InstallHooks() {
-    // only DLLs that are already loaded can be hooked; msvcp140d.dll is the debug CRT
-    HMODULE stl0 = GetModuleHandleW(L"msvcp140.dll");
-    HMODULE stl1 = GetModuleHandleW(L"msvcp140d.dll");
-    int n0 = 0, n1 = 0;
+    // Only DLLs that are already loaded can be hooked. [0]/[1] VS2015+ release/debug STL,
+    // [2]/[3] VS2013 (v120) release/debug STL (msvcp120.dll: std::mutex -> _Mtx_* -> ConcRT).
+    HMODULE stl[4] = { GetModuleHandleW(L"msvcp140.dll"), GetModuleHandleW(L"msvcp140d.dll"),
+                       GetModuleHandleW(L"msvcp120.dll"), GetModuleHandleW(L"msvcp120d.dll") };
+    int n[4] = { 0, 0, 0, 0 };
     DetourTransactionBegin();
     UpdateAllThreads();
     DetourAttach(&(PVOID&)RealEnterCS, HookEnterCS);
@@ -364,17 +366,31 @@ BOOL LD_InstallHooks() {
     DetourAttach(&(PVOID&)RealReleaseSh, HookReleaseSh);
     DetourAttach(&(PVOID&)RealTryEx, HookTryEx);
     DetourAttach(&(PVOID&)RealTrySh, HookTrySh);
-    if (stl0) n0 = StlMtx<0>::Attach(stl0);
-    if (stl1) n1 = StlMtx<1>::Attach(stl1);
+    if (stl[0]) n[0] = StlMtx<0>::Attach(stl[0]);
+    if (stl[1]) n[1] = StlMtx<1>::Attach(stl[1]);
+    if (stl[2]) n[2] = StlMtx<2>::Attach(stl[2]);
+    if (stl[3]) n[3] = StlMtx<3>::Attach(stl[3]);
     LONG rc = DetourTransactionCommit();
     ReleaseUpdatedThreads();
-    g_stlAttached[0] = (rc == NO_ERROR) ? n0 : 0;
-    g_stlAttached[1] = (rc == NO_ERROR) ? n1 : 0;
+    for (int i = 0; i < 4; ++i) g_stlAttached[i] = (rc == NO_ERROR) ? n[i] : 0;
     if (rc == NO_ERROR) {
-        LD_LogMessage("INFO", stl0 ? (n0 == 5 ? "STL std::mutex hooks active (msvcp140.dll _Mtx_*: 5/5)"
-                                              : "STL std::mutex hooks PARTIAL (msvcp140.dll _Mtx_* missing exports)")
-                                   : "msvcp140.dll not loaded: only statically linked std::mutex is tracked");
-        if (stl1) LD_LogMessage("INFO", "msvcp140d.dll (debug CRT) std::mutex hooks attached");
+        static const char* const ok[4] = {
+            "STL std::mutex hooks active: msvcp140.dll _Mtx_* 5/5",
+            "STL std::mutex hooks active: msvcp140d.dll _Mtx_* 5/5",
+            "STL std::mutex hooks active: msvcp120.dll _Mtx_* 5/5 (VS2013/v120)",
+            "STL std::mutex hooks active: msvcp120d.dll _Mtx_* 5/5 (VS2013/v120 debug)" };
+        static const char* const part[4] = {
+            "STL std::mutex hooks PARTIAL: msvcp140.dll is missing _Mtx_* exports",
+            "STL std::mutex hooks PARTIAL: msvcp140d.dll is missing _Mtx_* exports",
+            "STL std::mutex hooks PARTIAL: msvcp120.dll is missing _Mtx_* exports",
+            "STL std::mutex hooks PARTIAL: msvcp120d.dll is missing _Mtx_* exports" };
+        bool any = false;
+        for (int i = 0; i < 4; ++i) {
+            if (!stl[i]) continue;
+            any = true;
+            LD_LogMessage("INFO", n[i] == 5 ? ok[i] : part[i]);
+        }
+        if (!any) LD_LogMessage("INFO", "no msvcp140/msvcp120 loaded at start: only statically linked std::mutex is tracked");
     }
     return rc == NO_ERROR;
 }
@@ -400,6 +416,8 @@ void LD_RemoveHooks() {
     DetourDetach(&(PVOID&)RealTrySh, HookTrySh);
     if (g_stlAttached[0]) StlMtx<0>::Detach();
     if (g_stlAttached[1]) StlMtx<1>::Detach();
+    if (g_stlAttached[2]) StlMtx<2>::Detach();
+    if (g_stlAttached[3]) StlMtx<3>::Detach();
     DetourTransactionCommit();
     ReleaseUpdatedThreads();
 }

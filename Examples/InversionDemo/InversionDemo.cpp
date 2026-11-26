@@ -382,6 +382,53 @@ static int ScenarioEdges(int n, int rounds) {
     return 0;
 }
 
+
+// ------------------------------------------------- msvcp120.dll (VS2013 / v120 STL)
+// Calls the _Mtx_* exports of the real msvcp120.dll straight from this executable, exactly
+// as an inlined VS2013 std::mutex::lock() would. No v120 compiler is needed. msvcp120.dll
+// must be loaded BEFORE the detector starts (hooks only attach to already loaded DLLs).
+typedef int (__cdecl *PFN_MInit)(void**, int);
+typedef int (__cdecl *PFN_MOp)(void*);
+static PFN_MInit mInit; static PFN_MOp mLock, mUnlock;
+static void *mA, *mB, *mR;
+static bool Msvcp120Load() {
+    HMODULE h = LoadLibraryW(L"msvcp120.dll");
+    if (!h) return false;
+    mInit   = (PFN_MInit)GetProcAddress(h, "_Mtx_init");
+    mLock   = (PFN_MOp)GetProcAddress(h, "_Mtx_lock");
+    mUnlock = (PFN_MOp)GetProcAddress(h, "_Mtx_unlock");
+    return mInit && mLock && mUnlock;
+}
+static DWORD WINAPI M120AB(LPVOID) { mLock(mA); mLock(mB); mUnlock(mB); mUnlock(mA); return 0; }
+static DWORD WINAPI M120BA(LPVOID) { mLock(mB); mLock(mA); mUnlock(mA); mUnlock(mB); return 0; }
+static DWORD WINAPI M120Rec(LPVOID) { mLock(mR); mLock(mR); mLock(mB); mUnlock(mB); mUnlock(mR); mUnlock(mR); return 0; }
+static DWORD WINAPI M120Dl1(LPVOID) {
+    mLock(mA); InterlockedIncrement(&g_ready); while (g_ready < 2) Sleep(1); Sleep(50);
+    mLock(mB); mUnlock(mB); mUnlock(mA); return 0;
+}
+static DWORD WINAPI M120Dl2(LPVOID) {
+    mLock(mB); InterlockedIncrement(&g_ready); while (g_ready < 2) Sleep(1); Sleep(50);
+    mLock(mA); mUnlock(mA); mUnlock(mB); return 0;
+}
+static int ScenarioMsvcp120(const std::string& scenario) {
+    // _Mtx_plain(1) | _Mtx_try(2), recursive adds 0x100
+    mInit(&mA, 0x03); mInit(&mB, 0x03); mInit(&mR, 0x103);
+    if (scenario == "recursive-mtx120") Say("LOCKS A=%p B=%p", mR, mB);
+    else                                Say("LOCKS A=%p B=%p", mA, mB);
+    if (scenario == "inversion-mtx120")  { RunAndJoin(M120AB); RunAndJoin(M120BA); }
+    else if (scenario == "consistent-mtx120") { RunAndJoin(M120AB); RunAndJoin(M120AB); }
+    else if (scenario == "recursive-mtx120")  { RunAndJoin(M120Rec); RunAndJoin(M120Rec); }
+    else if (scenario == "deadlock-mtx120") {
+        HANDLE h[2] = { Spawn(M120Dl1, NULL), Spawn(M120Dl2, NULL) };
+        DWORD r = WaitForMultipleObjects(2, h, TRUE, 3000);
+        if (r == WAIT_TIMEOUT) { Say("RESULT deadlock-confirmed"); TerminateProcess(GetCurrentProcess(), 3); }
+        Say("RESULT no-deadlock r=%lu", r);
+        return 0;
+    }
+    Say("RESULT scenario-finished");
+    return 0;
+}
+
 // --------------------------------------------------------------------- main
 static std::wstring W(const char* s) {
     int n = MultiByteToWideChar(CP_ACP, 0, s, -1, NULL, 0);
@@ -408,6 +455,8 @@ int main(int argc, char** argv) {
         g_threads[0] = hm; g_threadCount = 1;
         CloseHandle(CreateThread(NULL, 0, Watchdog, NULL, 0, NULL));
     }
+    bool isM120 = scenario.size() > 7 && scenario.compare(scenario.size() - 7, 7, "-mtx120") == 0;
+    if (isM120 && !Msvcp120Load()) { Say("SKIP msvcp120.dll (VC++ 2013 runtime) not available"); return 77; }
     if (!dll.empty() && !StartDetector(dll.c_str(), log.c_str())) return 1;
     SnapshotModules();
     Say("MODULES %d main_tid=%lu", g_modCount, GetCurrentThreadId());
@@ -426,6 +475,7 @@ int main(int argc, char** argv) {
     else if (scenario == "recursive-stdmutex") ScenarioInversion("std-recursive", false);
     else if (scenario == "deadlock-stdmutex") ScenarioInversion("std-deadlock", false);
     else if (scenario == "deadlock")        rc = ScenarioDeadlock();
+    else if (isM120) rc = ScenarioMsvcp120(scenario);
     else if (scenario == "thread-trivial") {   // just create + join one empty thread
         HANDLE h = Spawn([](LPVOID) -> DWORD { return 0; }, NULL);
         WaitForSingleObject(h, INFINITE); CloseHandle(h);

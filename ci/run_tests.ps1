@@ -120,6 +120,26 @@ foreach ($e in @(@('InversionDemo.exe','/MD'), @('InversionDemoMT.exe','/MT'))) 
     Check "$lbl real deadlock: warning logged while blocked" ($n -ge 1 -and $r.Exit -eq 3) "(exit=$($r.Exit) allWarnings=$n)"
 }
 
+Write-Host "`n==== 3c. VS2013 (v120) std::mutex path: msvcp120.dll _Mtx_* ===="
+$m120 = Join-Path $BinDir 'InversionDemo.exe'
+$r = Run-Demo @('inversion-mtx120') 'mtx120-inv' -Detector -Exe $m120
+if ($r.Exit -eq 77) {
+    Write-Host "[SKIP] msvcp120.dll not available on this machine (install the VC++ 2013 x64 runtime)"
+} else {
+    $w = Warnings-For $r
+    Check "v120 std::mutex (msvcp120.dll) inversion: reported for the two mutexes" ($w.Count -ge 1 -and $r.Exit -eq 0) "(exit=$($r.Exit) matching=$($w.Count) allWarnings=$((Warnings-All $r).Count))"
+    $r.Stdout -split "`r?`n" | Where-Object { $_ -match '^LOCKS' } | ForEach-Object { Write-Host "  $_" }
+    (Warnings-All $r) | Select-Object -First 2 | ForEach-Object { Write-Host "  $_" }
+    ($r.Log -split "`r?`n" | Where-Object { $_ -match 'STL std::mutex|msvcp1' }) | ForEach-Object { Write-Host "  $_" }
+    $r = Run-Demo @('consistent-mtx120') 'mtx120-cons' -Detector -Exe $m120
+    Check "v120 std::mutex consistent order: no warning" ((Warnings-All $r).Count -eq 0 -and $r.Exit -eq 0) "(exit=$($r.Exit) allWarnings=$((Warnings-All $r).Count))"
+    $r = Run-Demo @('recursive-mtx120') 'mtx120-rec' -Detector -Exe $m120
+    Check "v120 recursive mutex re-lock: no warning" ((Warnings-All $r).Count -eq 0 -and $r.Exit -eq 0) "(exit=$($r.Exit) allWarnings=$((Warnings-All $r).Count))"
+    $r = Run-Demo @('deadlock-mtx120') 'mtx120-dl' -Detector -Exe $m120
+    $w = Warnings-For $r
+    Check "v120 std::mutex real deadlock: warning logged while blocked" ($w.Count -ge 1 -and $r.Exit -eq 3) "(exit=$($r.Exit) matching=$($w.Count))"
+}
+
 Write-Host "`n==== 4. benchmark (ns per lock+unlock, wall time / iters per thread) ===="
 $bench = New-Object System.Collections.ArrayList
 $cases = @(
