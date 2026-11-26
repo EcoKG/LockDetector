@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" ToolsVersion="12.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|x64"><Configuration>Debug</Configuration><Platform>x64</Platform></ProjectConfiguration>
+    <ProjectConfiguration Include="Release|x64"><Configuration>Release</Configuration><Platform>x64</Platform></ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals"><ProjectGuid>{A4F7D4C1-9F8D-4E72-A1A4-123456789001}</ProjectGuid><Keyword>Win32Proj</Keyword><RootNamespace>LockDetector</RootNamespace></PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="Configuration"><ConfigurationType>DynamicLibrary</ConfigurationType><UseDebugLibraries>true</UseDebugLibraries><PlatformToolset>v120</PlatformToolset><CharacterSet>Unicode</CharacterSet></PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration"><ConfigurationType>DynamicLibrary</ConfigurationType><UseDebugLibraries>false</UseDebugLibraries><PlatformToolset>v120</PlatformToolset><CharacterSet>Unicode</CharacterSet></PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <PropertyGroup><OutDir>$(SolutionDir)bin\$(Platform)\$(Configuration)\</OutDir><IntDir>$(SolutionDir)obj\$(ProjectName)\$(Platform)\$(Configuration)\</IntDir><TargetName>LockDetector</TargetName></PropertyGroup>
+  <ItemDefinitionGroup>
+    <ClCompile><WarningLevel>Level3</WarningLevel><Optimization Condition="'$(Configuration)'=='Debug'">Disabled</Optimization><PreprocessorDefinitions>WIN32_LEAN_AND_MEAN;_WIN32_WINNT=0x0601;%(PreprocessorDefinitions)</PreprocessorDefinitions><AdditionalIncludeDirectories>$(DETOURS_ROOT)\src;..\Common;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories><RuntimeLibrary Condition="'$(Configuration)'=='Debug'">MultiThreadedDebugDLL</RuntimeLibrary><RuntimeLibrary Condition="'$(Configuration)'=='Release'">MultiThreadedDLL</RuntimeLibrary><DebugInformationFormat>ProgramDatabase</DebugInformationFormat></ClCompile>
+    <Link><AdditionalDependencies>detours.lib;%(AdditionalDependencies)</AdditionalDependencies><AdditionalLibraryDirectories>$(DETOURS_ROOT)\lib.X64;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories><ModuleDefinitionFile>LockDetector.def</ModuleDefinitionFile><GenerateDebugInformation>true</GenerateDebugInformation></Link>
+  </ItemDefinitionGroup>
+  <ItemGroup><ClCompile Include="LockDetector.cpp"/><ClCompile Include="LockTracker.cpp"/><ClCompile Include="LockHooks.cpp"/></ItemGroup>
+  <ItemGroup><ClInclude Include="LockTracker.h"/><ClInclude Include="LockHooks.h"/><ClInclude Include="..\Common\LockProtocol.h"/></ItemGroup>
+  <ItemGroup><None Include="LockDetector.def"/></ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+</Project>

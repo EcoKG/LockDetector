@@ -1,0 +1,36 @@
+name: ci
+
+on:
+  push:
+    branches: ['**']
+  workflow_dispatch:
+
+jobs:
+  windows:
+    runs-on: windows-2022
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Checkout Detours
+        uses: actions/checkout@v4
+        with:
+          repository: microsoft/Detours
+          path: third_party/Detours
+
+      - name: Configure
+        run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DDETOURS_ROOT="${{ github.workspace }}/third_party/Detours"
+
+      - name: Build (Release)
+        run: cmake --build build --config Release
+
+      - name: Run scenarios (inversion / deadlock / benchmark)
+        shell: pwsh
+        run: ./ci/run_tests.ps1 -BinDir build/bin/Release -OutDir results -NoFail
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: results
+          path: results
