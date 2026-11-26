@@ -207,7 +207,22 @@ static DWORD WINAPI SrwBA(LPVOID) {
     ReleaseSRWLockExclusive(&srwA); ReleaseSRWLockExclusive(&srwB); return 0;
 }
 
+static DWORD WINAPI SrwShAB(LPVOID) {
+    AcquireSRWLockShared(&srwA); AcquireSRWLockShared(&srwB);
+    ReleaseSRWLockShared(&srwB); ReleaseSRWLockShared(&srwA); return 0;
+}
+static DWORD WINAPI SrwShBA(LPVOID) {
+    AcquireSRWLockShared(&srwB); AcquireSRWLockShared(&srwA);
+    ReleaseSRWLockShared(&srwA); ReleaseSRWLockShared(&srwB); return 0;
+}
 static void ScenarioInversion(const char* kind, bool consistent) {
+    if (!strcmp(kind, "srw-shared")) {   // opposite order, but shared/shared can never deadlock
+        Say("LOCKS A=%p B=%p", (void*)&srwA, (void*)&srwB);
+        RunAndJoin(SrwShAB);
+        RunAndJoin(SrwShBA);
+        Say("RESULT scenario-finished");
+        return;
+    }
     if (!strcmp(kind, "cs")) {
         InitializeCriticalSection(&csA); InitializeCriticalSection(&csB);
         Say("LOCKS A=%p B=%p", (void*)&csA, (void*)&csB);
@@ -361,6 +376,7 @@ int main(int argc, char** argv) {
     else if (scenario == "inversion-mutex") ScenarioInversion("mutex", false);
     else if (scenario == "inversion-srw")   ScenarioInversion("srw", false);
     else if (scenario == "consistent-order")ScenarioInversion("cs", true);
+    else if (scenario == "srw-shared-only") ScenarioInversion("srw-shared", false);
     else if (scenario == "deadlock")        rc = ScenarioDeadlock();
     else if (scenario == "thread-trivial") {   // just create + join one empty thread
         HANDLE h = Spawn([](LPVOID) -> DWORD { return 0; }, NULL);

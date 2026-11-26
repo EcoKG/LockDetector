@@ -40,7 +40,7 @@ add_library(LockDetector SHARED
   LockDetector/LockDetector.def)
 target_compile_definitions(LockDetector PRIVATE
   _WIN32_WINNT=0x0601 WIN32_LEAN_AND_MEAN UNICODE _UNICODE)
-target_link_libraries(LockDetector PRIVATE detours)
+target_link_libraries(LockDetector PRIVATE detours psapi)
 if(MSVC)
   target_link_options(LockDetector PRIVATE /MAP)
 endif()

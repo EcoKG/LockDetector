@@ -48,6 +48,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         g_edit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
             WS_CHILD|WS_VISIBLE|WS_VSCROLL|ES_MULTILINE|ES_READONLY|ES_AUTOVSCROLL,
             0,0,0,0, hwnd, (HMENU)100, GetModuleHandleW(NULL), NULL);
+        SendMessageW(g_edit, EM_SETLIMITTEXT, 0x7FFFFFFE, 0);   // default limit would silently stop output
         SetTimer(hwnd, 1, 500, NULL);
         return 0;
     case WM_SIZE:

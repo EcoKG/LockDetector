@@ -15,7 +15,7 @@ $dll  = Join-Path $BinDir 'LockDetector.dll'
 $script:fails = 0
 $script:summary = New-Object System.Collections.ArrayList
 
-function Run-Demo([string[]]$DemoArgs, [string]$Tag, [switch]$Detector, [int]$Timeout = $TimeoutSec) {
+function Run-Demo([string[]]$DemoArgs, [string]$Tag, [switch]$Detector, [int]$Timeout = $TimeoutSec, [hashtable]$Env = @{}) {
     $log = Join-Path $OutDir "$Tag.detector.log"
     if (Test-Path $log) { Remove-Item $log -Force }
     $all = @($DemoArgs)
@@ -26,6 +26,7 @@ function Run-Demo([string[]]$DemoArgs, [string]$Tag, [switch]$Detector, [int]$Ti
     $psi.RedirectStandardOutput = $true
     $psi.RedirectStandardError = $true
     $psi.UseShellExecute = $false
+    foreach ($k in $Env.Keys) { $psi.EnvironmentVariables[$k] = [string]$Env[$k] }
     $p = [System.Diagnostics.Process]::Start($psi)
     $outTask = $p.StandardOutput.ReadToEndAsync()
     $errTask = $p.StandardError.ReadToEndAsync()
@@ -66,8 +67,8 @@ Write-Host "`n==== 0. diagnostics: minimal thread creation with detector ===="
 $r = Run-Demo @('thread-trivial') 'thread-trivial-plain'
 Write-Host ("plain    : exit=$($r.Exit) " + $r.Stdout.Trim())
 $r = Run-Demo @('thread-trivial') 'thread-trivial-det' -Detector
-Write-Host ("detector : exit=$($r.Exit)")
-Write-Host $r.Stdout
+Check "thread-trivial : process with detector starts a thread and exits cleanly" ($r.Exit -eq 0 -and $r.Stdout -match 'RESULT thread-trivial-finished') "(exit=$($r.Exit))"
+if ($r.Exit -ne 0) { Write-Host $r.Stdout }
 Write-Host "`n==== 1. lock-order inversion (threads do not overlap) ===="
 foreach ($k in 'cs','mutex','srw') {
     $r = Run-Demo @("inversion-$k") "inversion-$k" -Detector
@@ -83,12 +84,16 @@ Check "consistent-order : no cycle reported for the two locks" ($w.Count -eq 0) 
 $all = Warnings-All $r
 if ($all.Count -gt 0) { Write-Host "  sample warnings (not about the demo locks = false positives from internal/system locks):"; $all | Select-Object -First 5 | ForEach-Object { Write-Host "   $_" } }
 
+$r = Run-Demo @('srw-shared-only') 'srw-shared-only' -Detector
+$w = Warnings-For $r
+Check "srw-shared-only : shared/shared opposite order is not reported" ($w.Count -eq 0 -and $r.Exit -eq 0) "(exit=$($r.Exit) matching=$($w.Count))"
+
 Write-Host "`n==== 3. real deadlock ===="
 $r = Run-Demo @('deadlock') 'deadlock-nodetector'
 Check "deadlock scenario really deadlocks without detector" ($r.Exit -eq 3) "(exit=$($r.Exit))"
 $r = Run-Demo @('deadlock') 'deadlock-detector' -Detector
 $w = Warnings-For $r
-Check "deadlock : detector reports cycle BEFORE/while threads are blocked" ($w.Count -ge 1) "(exit=$($r.Exit) matching=$($w.Count) allWarnings=$((Warnings-All $r).Count) logBytes=$($r.LogSize))"
+Check "deadlock : detector reports cycle while the threads are really blocked (exit 3 = hang confirmed)" ($w.Count -ge 1 -and $r.Exit -eq 3) "(exit=$($r.Exit) matching=$($w.Count) allWarnings=$((Warnings-All $r).Count) logBytes=$($r.LogSize))"
 
 Write-Host "`n==== 4. benchmark (ns per lock+unlock, wall time / iters per thread) ===="
 $bench = New-Object System.Collections.ArrayList
@@ -97,23 +102,28 @@ $cases = @(
   @('srw-own',1,20000), @('mutex-own',1,20000), @('event-wait',1,20000)
 )
 foreach ($c in $cases) {
-    foreach ($det in $false,$true) {
-        $tag = "bench-$($c[0])-t$($c[1])-" + $(if($det){'det'}else{'plain'})
-        if ($det) { $r = Run-Demo @('bench',$c[0],$c[1],$c[2]) $tag -Detector } else { $r = Run-Demo @('bench',$c[0],$c[1],$c[2]) $tag }
+    foreach ($variant in 'plain','det','det+verbose') {
+        $tag = "bench-$($c[0])-t$($c[1])-$variant"
+        $a = @('bench',$c[0],$c[1],$c[2])
+        if ($variant -eq 'plain') { $r = Run-Demo $a $tag }
+        elseif ($variant -eq 'det') { $r = Run-Demo $a $tag -Detector }
+        else { $r = Run-Demo $a $tag -Detector -Env @{ LOCKDETECTOR_VERBOSE = '1' } }
         $ns = $null
         if ($r.Stdout -match 'ns_per_op=([\d\.]+)') { $ns = [double]$Matches[1] }
-        $row = [pscustomobject]@{ mode=$c[0]; threads=$c[1]; iters=$c[2]; detector=$det; ns_per_op=$ns; exit=$r.Exit; timedOut=$r.TimedOut; logBytes=$r.LogSize }
+        $row = [pscustomobject]@{ mode=$c[0]; threads=$c[1]; iters=$c[2]; variant=$variant; ns_per_op=$ns; exit=$r.Exit; timedOut=$r.TimedOut; logBytes=$r.LogSize }
         [void]$bench.Add($row)
-        Write-Host ("{0,-11} t={1} iters={2} detector={3,-5} ns/op={4,-12} exit={5} timeout={6} log={7}B" -f $c[0],$c[1],$c[2],$det,$ns,$r.Exit,$r.TimedOut,$r.LogSize)
+        Write-Host ("{0,-11} t={1} iters={2} {3,-12} ns/op={4,-12} exit={5} timeout={6} log={7}B" -f $c[0],$c[1],$c[2],$variant,$ns,$r.Exit,$r.TimedOut,$r.LogSize)
     }
 }
-Write-Host "`n-- overhead ratio (detector / plain) --"
+Write-Host "`n-- overhead ratio vs plain --"
 foreach ($c in $cases) {
-    $p = $bench | Where-Object { $_.mode -eq $c[0] -and $_.threads -eq $c[1] -and -not $_.detector }
-    $d = $bench | Where-Object { $_.mode -eq $c[0] -and $_.threads -eq $c[1] -and $_.detector }
-    if ($p.ns_per_op -and $d.ns_per_op) {
-        Write-Host ("{0,-11} t={1}  plain={2,10:N1} ns   detector={3,12:N1} ns   x{4:N0}" -f $c[0],$c[1],$p.ns_per_op,$d.ns_per_op,($d.ns_per_op/$p.ns_per_op))
-    } else { Write-Host ("{0,-11} t={1}  no result (plain={2} detector={3})" -f $c[0],$c[1],$p.ns_per_op,$d.ns_per_op) }
+    $p  = $bench | Where-Object { $_.mode -eq $c[0] -and $_.threads -eq $c[1] -and $_.variant -eq 'plain' }
+    foreach ($v in 'det','det+verbose') {
+        $d = $bench | Where-Object { $_.mode -eq $c[0] -and $_.threads -eq $c[1] -and $_.variant -eq $v }
+        if ($p.ns_per_op -and $d.ns_per_op) {
+            Write-Host ("{0,-11} t={1} {2,-12} plain={3,9:N1} ns  detector={4,11:N1} ns  x{5:N1}" -f $c[0],$c[1],$v,$p.ns_per_op,$d.ns_per_op,($d.ns_per_op/$p.ns_per_op))
+        } else { Write-Host ("{0,-11} t={1} {2,-12} no result" -f $c[0],$c[1],$v) }
+    }
 }
 
 Write-Host "`n==== 5. lock-order graph growth (edges) ===="
