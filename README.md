@@ -55,6 +55,7 @@ pwsh ci/run_tests.ps1 -BinDir build/bin/Release -OutDir results
 | 역전락 CS/Mutex/SRW 탐지 | 크래시 또는 hang, 경고 0건 | 3종 모두 경고 1건, 거짓 양성 0건 |
 | 실제 데드락 | 경고 없음 | 블록된 상태에서 경고 기록 |
 | 일관된 순서 / shared-only | (실행 불가) | 경고 없음 |
+| `std::mutex` 역전·데드락 (`/MD`, `/MT`) | 해당 없음(미지원) | 둘 다 탐지, 재귀·일관 순서는 경고 없음 |
 | 락 300개 중첩 획득(라운드당) | 약 1,190~1,440 ms | 약 8~14 ms |
 | CS lock+unlock, 1스레드 | (측정 불가) | 10 ns → 약 95 ns |
 | SRW lock+unlock, 1스레드 | (측정 불가) | 10 ns → 약 53 ns |
@@ -65,7 +66,10 @@ pwsh ci/run_tests.ps1 -BinDir build/bin/Release -OutDir results
 ## 한계
 
 - VS2013(v120) 빌드는 검증하지 못했습니다. CI는 VS2022(v143)로 빌드합니다. 소스는 C++11 범위를 유지했습니다.
-- `std::mutex`, `WaitForMultipleObjects`, `SignalObjectAndWait`, `OpenMutex`, `DuplicateHandle` 은 후킹하지 않습니다.
+- `std::mutex` / `std::recursive_mutex`:
+  - `/MD`(동적 CRT): `msvcp140.dll`의 `_Mtx_lock/_trylock/_timedlock/_unlock/_destroy_in_situ`를 후킹해 추적합니다. **시작 시점에 이 DLL이 이미 로드되어 있어야 합니다.** 이후에 로드된 경우, 또는 다른 STL 구현·버전에서 이 export가 없으면 추적하지 못합니다(로그에 후킹 개수가 남습니다).
+  - `/MT`(정적 CRT): 내부 SRWLOCK 호출로 추적됩니다. 경고의 락 주소는 `std::mutex` 객체 주소보다 0x10 큽니다.
+- `WaitForMultipleObjects`, `SignalObjectAndWait`, `OpenMutex`, `DuplicateHandle` 은 후킹하지 않습니다.
 - 시작 이전에 만든 뮤텍스 핸들은 등록되지 않습니다.
 - 시스템 폴더(`\Windows\System32` 등)의 모듈이 호출한 락은 추적하지 않습니다.
 - 용량은 고정입니다: 락 131,072개, 간선 1,048,576개, 스레드 2,048개. 초과분은 경고 후 추적을 중단합니다.
