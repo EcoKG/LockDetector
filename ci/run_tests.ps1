@@ -15,13 +15,13 @@ $dll  = Join-Path $BinDir 'LockDetector.dll'
 $script:fails = 0
 $script:summary = New-Object System.Collections.ArrayList
 
-function Run-Demo([string[]]$DemoArgs, [string]$Tag, [switch]$Detector, [int]$Timeout = $TimeoutSec, [hashtable]$Env = @{}) {
+function Run-Demo([string[]]$DemoArgs, [string]$Tag, [switch]$Detector, [int]$Timeout = $TimeoutSec, [hashtable]$Env = @{}, [string]$Exe = $demo) {
     $log = Join-Path $OutDir "$Tag.detector.log"
     if (Test-Path $log) { Remove-Item $log -Force }
     $all = @($DemoArgs)
     if ($Detector) { $all += @('--detector', $dll, '--log', $log) }
     $psi = New-Object System.Diagnostics.ProcessStartInfo
-    $psi.FileName = $demo
+    $psi.FileName = $Exe
     $psi.Arguments = ($all | ForEach-Object { '"' + $_ + '"' }) -join ' '
     $psi.RedirectStandardOutput = $true
     $psi.RedirectStandardError = $true
@@ -94,6 +94,16 @@ Check "deadlock scenario really deadlocks without detector" ($r.Exit -eq 3) "(ex
 $r = Run-Demo @('deadlock') 'deadlock-detector' -Detector
 $w = Warnings-For $r
 Check "deadlock : detector reports cycle while the threads are really blocked (exit 3 = hang confirmed)" ($w.Count -ge 1 -and $r.Exit -eq 3) "(exit=$($r.Exit) matching=$($w.Count) allWarnings=$((Warnings-All $r).Count) logBytes=$($r.LogSize))"
+
+Write-Host "`n==== 3b. std::mutex (opposite order, threads do not overlap) ===="
+foreach ($e in @(@('InversionDemo.exe','/MD (std::mutex via msvcp140.dll)'), @('InversionDemoMT.exe','/MT (std::mutex compiled into the exe)'))) {
+    $exe = Join-Path $BinDir $e[0]
+    $r = Run-Demo @('inversion-stdmutex') ("stdmutex-" + $e[0]) -Detector -Exe $exe
+    $n = (Warnings-All $r).Count
+    Check ("std::mutex " + $e[1] + " : detector reports the inversion") ($n -ge 1) "(exit=$($r.Exit) allWarnings=$n logBytes=$($r.LogSize))"
+    $r.Stdout -split "`r?`n" | Where-Object { $_ -match '^LOCKS' } | ForEach-Object { Write-Host "  $_" }
+    (Warnings-All $r) | Select-Object -First 2 | ForEach-Object { Write-Host "  $_" }
+}
 
 Write-Host "`n==== 4. benchmark (ns per lock+unlock, wall time / iters per thread) ===="
 $bench = New-Object System.Collections.ArrayList

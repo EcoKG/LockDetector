@@ -55,3 +55,9 @@ endif()
 add_executable(InversionDemo Examples/InversionDemo/InversionDemo.cpp)
 target_compile_definitions(InversionDemo PRIVATE _WIN32_WINNT=0x0601 WIN32_LEAN_AND_MEAN)
 
+
+# Same demo with the static CRT: std::mutex code is then compiled into the executable
+# itself instead of living in msvcp140.dll (used to check what the tracker can see).
+add_executable(InversionDemoMT Examples/InversionDemo/InversionDemo.cpp)
+target_compile_definitions(InversionDemoMT PRIVATE _WIN32_WINNT=0x0601 WIN32_LEAN_AND_MEAN)
+set_property(TARGET InversionDemoMT PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded")
