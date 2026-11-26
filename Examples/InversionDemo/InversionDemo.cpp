@@ -60,8 +60,12 @@ static void StopDetector() {
     if (g_stop) g_stop();
 }
 
+extern HANDLE g_threads[64]; extern volatile LONG g_threadCount;
 static HANDLE Spawn(LPTHREAD_START_ROUTINE f, LPVOID p) {
-    return CreateThread(NULL, 0, f, p, 0, NULL);
+    HANDLE h = CreateThread(NULL, 0, f, p, 0, NULL);
+    LONG i = InterlockedIncrement(&g_threadCount) - 1;
+    if (i < 64) g_threads[i] = h;
+    return h;
 }
 static void RunAndJoin(LPTHREAD_START_ROUTINE f) {
     HANDLE h = Spawn(f, NULL);
@@ -116,6 +120,44 @@ static void RawAddr(char* dst, ULONG64 a) {
     }
     RawHex(dst, a);
 }
+static void DumpFrames(CONTEXT c) {
+    char line[256], a[128], h[24];
+    for (int i = 0; i < 40; ++i) {
+        ULONG64 pc = c.Rip;
+        RawAddr(a, pc);
+        strcpy(line, "  frame#"); RawHex(h, i); strcat(line, h); strcat(line, " "); strcat(line, a); strcat(line, "\r\n");
+        RawWrite(line);
+        ULONG64 base = 0;
+        PRUNTIME_FUNCTION rf = RtlLookupFunctionEntry(pc, &base, NULL);
+        if (!rf) { c.Rip = *(ULONG64*)c.Rsp; c.Rsp += 8; }
+        else { PVOID hd = NULL; ULONG64 ef = 0; RtlVirtualUnwind(UNW_FLAG_NHANDLER, base, pc, rf, &c, &hd, &ef, NULL); }
+        if (!c.Rip) break;
+    }
+}
+
+// Thread handles created by this demo, dumped by the watchdog when a run hangs.
+HANDLE g_threads[64];
+volatile LONG g_threadCount = 0;
+static DWORD g_watchdogSec = 25;
+static DWORD WINAPI Watchdog(LPVOID) {
+    Sleep(g_watchdogSec * 1000);
+    RawWrite("WATCHDOG expired: dumping demo threads (lock-free)\r\n");
+    char h[24], line[128];
+    for (LONG i = 0; i < g_threadCount && i < 64; ++i) {
+        HANDLE th = g_threads[i];
+        if (!th) continue;
+        if (SuspendThread(th) == (DWORD)-1) continue;
+        CONTEXT c; memset(&c, 0, sizeof(c)); c.ContextFlags = CONTEXT_FULL;
+        if (GetThreadContext(th, &c)) {
+            strcpy(line, "WATCHDOG thread#"); RawHex(h, i); strcat(line, h);
+            strcat(line, " tid="); RawHex(h, GetThreadId(th)); strcat(line, h); strcat(line, "\r\n");
+            RawWrite(line);
+            DumpFrames(c);
+        }
+    }
+    TerminateProcess(GetCurrentProcess(), 4);
+    return 0;
+}
 static LONG CALLBACK CrashHandler(EXCEPTION_POINTERS* ep) {
     DWORD code = ep->ExceptionRecord->ExceptionCode;
     if (code != EXCEPTION_ACCESS_VIOLATION && code != EXCEPTION_ILLEGAL_INSTRUCTION &&
@@ -130,18 +172,7 @@ static LONG CALLBACK CrashHandler(EXCEPTION_POINTERS* ep) {
         RawWrite(" av-target="); RawHex(h, ep->ExceptionRecord->ExceptionInformation[1]); RawWrite(h);
     }
     RawWrite("\r\n");
-    CONTEXT c = *ep->ContextRecord;
-    for (int i = 0; i < 40; ++i) {
-        ULONG64 pc = c.Rip;
-        RawAddr(a, pc);
-        strcpy(line, "CRASH frame#"); RawHex(h, i); strcat(line, h); strcat(line, " "); strcat(line, a); strcat(line, "\r\n");
-        RawWrite(line);
-        ULONG64 base = 0;
-        PRUNTIME_FUNCTION rf = RtlLookupFunctionEntry(pc, &base, NULL);
-        if (!rf) { c.Rip = *(ULONG64*)c.Rsp; c.Rsp += 8; }
-        else { PVOID hd = NULL; ULONG64 ef = 0; RtlVirtualUnwind(UNW_FLAG_NHANDLER, base, pc, rf, &c, &hd, &ef, NULL); }
-        if (!c.Rip) break;
-    }
+    DumpFrames(*ep->ContextRecord);
     TerminateProcess(GetCurrentProcess(), 0xC0000005);
     return EXCEPTION_CONTINUE_SEARCH;
 }
@@ -312,6 +343,12 @@ int main(int argc, char** argv) {
     }
     g_out = GetStdHandle(STD_OUTPUT_HANDLE);
     AddVectoredExceptionHandler(1, CrashHandler);
+    {   // watchdog: started before the detector is loaded
+        HANDLE hm = NULL;
+        DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(), &hm, 0, FALSE, DUPLICATE_SAME_ACCESS);
+        g_threads[0] = hm; g_threadCount = 1;
+        CloseHandle(CreateThread(NULL, 0, Watchdog, NULL, 0, NULL));
+    }
     if (!dll.empty() && !StartDetector(dll.c_str(), log.c_str())) return 1;
     SnapshotModules();
     Say("MODULES %d main_tid=%lu", g_modCount, GetCurrentThreadId());

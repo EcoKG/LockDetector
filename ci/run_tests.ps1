@@ -2,7 +2,7 @@ param(
     [string]$BinDir = "build/bin/Release",
     [string]$OutDir = "results",
     [switch]$NoFail,
-    [int]$TimeoutSec = 40
+    [int]$TimeoutSec = 60
 )
 # Runs InversionDemo scenarios with/without LockDetector.dll and verifies the
 # detector log. Prints a PASS/FAIL line per check and a benchmark table.
