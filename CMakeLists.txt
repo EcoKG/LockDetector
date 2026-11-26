@@ -12,6 +12,11 @@ endif()
 
 set(CMAKE_CXX_STANDARD 11)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+if(MSVC)  # keep PDBs in Release so CI crash traces are symbolized
+  set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} /Zi")
+  set(CMAKE_EXE_LINKER_FLAGS_RELEASE "${CMAKE_EXE_LINKER_FLAGS_RELEASE} /DEBUG /OPT:REF /OPT:ICF")
+  set(CMAKE_SHARED_LINKER_FLAGS_RELEASE "${CMAKE_SHARED_LINKER_FLAGS_RELEASE} /DEBUG /OPT:REF /OPT:ICF")
+endif()
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 
 # Detours is built straight from source (same file set as its Makefile).
@@ -46,3 +51,4 @@ endif()
 
 add_executable(InversionDemo Examples/InversionDemo/InversionDemo.cpp)
 target_compile_definitions(InversionDemo PRIVATE _WIN32_WINNT=0x0601 WIN32_LEAN_AND_MEAN)
+target_link_libraries(InversionDemo PRIVATE dbghelp)

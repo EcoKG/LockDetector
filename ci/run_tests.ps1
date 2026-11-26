@@ -2,7 +2,7 @@ param(
     [string]$BinDir = "build/bin/Release",
     [string]$OutDir = "results",
     [switch]$NoFail,
-    [int]$TimeoutSec = 120
+    [int]$TimeoutSec = 40
 )
 # Runs InversionDemo scenarios with/without LockDetector.dll and verifies the
 # detector log. Prints a PASS/FAIL line per check and a benchmark table.
@@ -62,6 +62,12 @@ function Warnings-All($r) { return @($r.Log -split "`r?`n" | Where-Object { $_ -
 Write-Host "==== environment ===="
 Write-Host ("OS: " + [System.Environment]::OSVersion.VersionString + "  CPUs: " + [Environment]::ProcessorCount)
 
+Write-Host "`n==== 0. diagnostics: minimal thread creation with detector ===="
+$r = Run-Demo @('thread-trivial') 'thread-trivial-plain'
+Write-Host ("plain    : exit=$($r.Exit) " + $r.Stdout.Trim())
+$r = Run-Demo @('thread-trivial') 'thread-trivial-det' -Detector
+Write-Host ("detector : exit=$($r.Exit)")
+Write-Host $r.Stdout
 Write-Host "`n==== 1. lock-order inversion (threads do not overlap) ===="
 foreach ($k in 'cs','mutex','srw') {
     $r = Run-Demo @("inversion-$k") "inversion-$k" -Detector

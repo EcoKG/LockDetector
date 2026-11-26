@@ -23,6 +23,7 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
+#include <dbghelp.h>
 #include <stdio.h>
 #include <stdarg.h>
 #include <stdlib.h>
@@ -66,6 +67,44 @@ static void RunAndJoin(LPTHREAD_START_ROUTINE f) {
     HANDLE h = Spawn(f, NULL);
     WaitForSingleObject(h, INFINITE);
     CloseHandle(h);
+}
+
+
+// ------------------------------------------------------------ crash report
+// Prints exception info and a symbolized stack so a crash inside the hooks can
+// be located from CI logs.
+static LONG WINAPI CrashFilter(EXCEPTION_POINTERS* ep) {
+    HANDLE proc = GetCurrentProcess();
+    Say("CRASH code=0x%08lX addr=%p tid=%lu", ep->ExceptionRecord->ExceptionCode,
+        ep->ExceptionRecord->ExceptionAddress, GetCurrentThreadId());
+    if (ep->ExceptionRecord->ExceptionCode == EXCEPTION_ACCESS_VIOLATION &&
+        ep->ExceptionRecord->NumberParameters >= 2)
+        Say("CRASH access-violation kind=%Iu target=%p",
+            ep->ExceptionRecord->ExceptionInformation[0],
+            (void*)ep->ExceptionRecord->ExceptionInformation[1]);
+    SymSetOptions(SYMOPT_LOAD_LINES | SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS);
+    SymInitialize(proc, NULL, TRUE);
+    CONTEXT ctx = *ep->ContextRecord;
+    STACKFRAME64 sf; memset(&sf, 0, sizeof(sf));
+    sf.AddrPC.Offset = ctx.Rip;   sf.AddrPC.Mode = AddrModeFlat;
+    sf.AddrFrame.Offset = ctx.Rbp; sf.AddrFrame.Mode = AddrModeFlat;
+    sf.AddrStack.Offset = ctx.Rsp; sf.AddrStack.Mode = AddrModeFlat;
+    for (int i = 0; i < 30; ++i) {
+        if (!StackWalk64(IMAGE_FILE_MACHINE_AMD64, proc, GetCurrentThread(), &sf, &ctx,
+                         NULL, SymFunctionTableAccess64, SymGetModuleBase64, NULL)) break;
+        if (!sf.AddrPC.Offset) break;
+        char buf[sizeof(SYMBOL_INFO) + 256];
+        SYMBOL_INFO* sym = (SYMBOL_INFO*)buf; memset(sym, 0, sizeof(buf));
+        sym->SizeOfStruct = sizeof(SYMBOL_INFO); sym->MaxNameLen = 255;
+        DWORD64 disp = 0;
+        IMAGEHLP_MODULE64 mi; memset(&mi, 0, sizeof(mi)); mi.SizeOfStruct = sizeof(mi);
+        const char* mod = SymGetModuleInfo64(proc, sf.AddrPC.Offset, &mi) ? mi.ModuleName : "?";
+        if (SymFromAddr(proc, sf.AddrPC.Offset, &disp, sym))
+            Say("CRASH frame#%d %p %s!%s+0x%llx", i, (void*)sf.AddrPC.Offset, mod, sym->Name, (unsigned long long)disp);
+        else
+            Say("CRASH frame#%d %p %s!?", i, (void*)sf.AddrPC.Offset, mod);
+    }
+    return EXCEPTION_EXECUTE_HANDLER;
 }
 
 // ---------------------------------------------------------------- inversion
@@ -232,6 +271,7 @@ int main(int argc, char** argv) {
         else if (!strcmp(argv[i], "--log") && i + 1 < argc) log = W(argv[++i]);
         else pos.push_back(argv[i]);
     }
+    SetUnhandledExceptionFilter(CrashFilter);
     if (!dll.empty() && !StartDetector(dll.c_str(), log.c_str())) return 1;
 
     int rc = 0;
@@ -240,6 +280,11 @@ int main(int argc, char** argv) {
     else if (scenario == "inversion-srw")   ScenarioInversion("srw", false);
     else if (scenario == "consistent-order")ScenarioInversion("cs", true);
     else if (scenario == "deadlock")        rc = ScenarioDeadlock();
+    else if (scenario == "thread-trivial") {   // just create + join one empty thread
+        HANDLE h = Spawn([](LPVOID) -> DWORD { return 0; }, NULL);
+        WaitForSingleObject(h, INFINITE); CloseHandle(h);
+        Say("RESULT thread-trivial-finished");
+    }
     else if (scenario == "bench" && pos.size() >= 3)
         rc = ScenarioBench(pos[0].c_str(), atoi(pos[1].c_str()), (DWORD)atol(pos[2].c_str()));
     else if (scenario == "edges" && pos.size() >= 2)
