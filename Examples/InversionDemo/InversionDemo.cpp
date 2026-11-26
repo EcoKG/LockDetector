@@ -23,7 +23,7 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
-#include <dbghelp.h>
+#include <tlhelp32.h>
 #include <stdio.h>
 #include <stdarg.h>
 #include <stdlib.h>
@@ -71,40 +71,79 @@ static void RunAndJoin(LPTHREAD_START_ROUTINE f) {
 
 
 // ------------------------------------------------------------ crash report
-// Prints exception info and a symbolized stack so a crash inside the hooks can
-// be located from CI logs.
-static LONG WINAPI CrashFilter(EXCEPTION_POINTERS* ep) {
-    HANDLE proc = GetCurrentProcess();
-    Say("CRASH code=0x%08lX addr=%p tid=%lu", ep->ExceptionRecord->ExceptionCode,
-        ep->ExceptionRecord->ExceptionAddress, GetCurrentThreadId());
-    if (ep->ExceptionRecord->ExceptionCode == EXCEPTION_ACCESS_VIOLATION &&
-        ep->ExceptionRecord->NumberParameters >= 2)
-        Say("CRASH access-violation kind=%Iu target=%p",
-            ep->ExceptionRecord->ExceptionInformation[0],
-            (void*)ep->ExceptionRecord->ExceptionInformation[1]);
-    SymSetOptions(SYMOPT_LOAD_LINES | SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS);
-    SymInitialize(proc, NULL, TRUE);
-    CONTEXT ctx = *ep->ContextRecord;
-    STACKFRAME64 sf; memset(&sf, 0, sizeof(sf));
-    sf.AddrPC.Offset = ctx.Rip;   sf.AddrPC.Mode = AddrModeFlat;
-    sf.AddrFrame.Offset = ctx.Rbp; sf.AddrFrame.Mode = AddrModeFlat;
-    sf.AddrStack.Offset = ctx.Rsp; sf.AddrStack.Mode = AddrModeFlat;
-    for (int i = 0; i < 30; ++i) {
-        if (!StackWalk64(IMAGE_FILE_MACHINE_AMD64, proc, GetCurrentThread(), &sf, &ctx,
-                         NULL, SymFunctionTableAccess64, SymGetModuleBase64, NULL)) break;
-        if (!sf.AddrPC.Offset) break;
-        char buf[sizeof(SYMBOL_INFO) + 256];
-        SYMBOL_INFO* sym = (SYMBOL_INFO*)buf; memset(sym, 0, sizeof(buf));
-        sym->SizeOfStruct = sizeof(SYMBOL_INFO); sym->MaxNameLen = 255;
-        DWORD64 disp = 0;
-        IMAGEHLP_MODULE64 mi; memset(&mi, 0, sizeof(mi)); mi.SizeOfStruct = sizeof(mi);
-        const char* mod = SymGetModuleInfo64(proc, sf.AddrPC.Offset, &mi) ? mi.ModuleName : "?";
-        if (SymFromAddr(proc, sf.AddrPC.Offset, &disp, sym))
-            Say("CRASH frame#%d %p %s!%s+0x%llx", i, (void*)sf.AddrPC.Offset, mod, sym->Name, (unsigned long long)disp);
-        else
-            Say("CRASH frame#%d %p %s!?", i, (void*)sf.AddrPC.Offset, mod);
+// Lock-free crash reporter: uses only WriteFile and manual unwinding so it keeps
+// working when the crash happens inside the hooked critical-section functions.
+// Addresses are printed as module+offset; resolve them with the linker .map.
+struct ModInfo { char name[64]; ULONG64 base; ULONG64 size; };
+static ModInfo g_mods[256];
+static int g_modCount = 0;
+static HANDLE g_out = NULL;
+static volatile LONG g_inCrash = 0;
+
+static void SnapshotModules() {
+    g_modCount = 0;
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, GetCurrentProcessId());
+    if (snap == INVALID_HANDLE_VALUE) return;
+    MODULEENTRY32 me; me.dwSize = sizeof(me);
+    if (Module32First(snap, &me)) do {
+        if (g_modCount >= 256) break;
+        ModInfo& m = g_mods[g_modCount++];
+        strncpy(m.name, me.szModule, 63); m.name[63] = 0;
+        m.base = (ULONG64)me.modBaseAddr; m.size = me.modBaseSize;
+    } while (Module32Next(snap, &me));
+    CloseHandle(snap);
+}
+static void RawWrite(const char* s) {
+    DWORD w; WriteFile(g_out, s, (DWORD)strlen(s), &w, NULL);
+}
+static void RawHex(char* dst, ULONG64 v) {
+    static const char* d = "0123456789ABCDEF";
+    int n = 0; char t[20];
+    if (!v) t[n++] = '0';
+    while (v) { t[n++] = d[v & 15]; v >>= 4; }
+    int k = 0; t[n] = 0;
+    dst[k++] = '0'; dst[k++] = 'x';
+    while (n) dst[k++] = t[--n];
+    dst[k] = 0;
+}
+static void RawAddr(char* dst, ULONG64 a) {
+    char h[24];
+    for (int i = 0; i < g_modCount; ++i) {
+        if (a >= g_mods[i].base && a < g_mods[i].base + g_mods[i].size) {
+            strcpy(dst, g_mods[i].name); strcat(dst, "+"); RawHex(h, a - g_mods[i].base); strcat(dst, h);
+            return;
+        }
     }
-    return EXCEPTION_EXECUTE_HANDLER;
+    RawHex(dst, a);
+}
+static LONG CALLBACK CrashHandler(EXCEPTION_POINTERS* ep) {
+    DWORD code = ep->ExceptionRecord->ExceptionCode;
+    if (code != EXCEPTION_ACCESS_VIOLATION && code != EXCEPTION_ILLEGAL_INSTRUCTION &&
+        code != EXCEPTION_STACK_OVERFLOW && code != EXCEPTION_IN_PAGE_ERROR &&
+        code != EXCEPTION_INT_DIVIDE_BY_ZERO) return EXCEPTION_CONTINUE_SEARCH;
+    if (InterlockedExchange(&g_inCrash, 1)) TerminateProcess(GetCurrentProcess(), 0xC0000005);
+    char line[256], a[128], h[24];
+    RawWrite("CRASH code="); RawHex(h, code); RawWrite(h);
+    RawWrite(" tid="); RawHex(h, GetCurrentThreadId()); RawWrite(h);
+    if (ep->ExceptionRecord->NumberParameters >= 2) {
+        RawWrite(" av-kind="); RawHex(h, ep->ExceptionRecord->ExceptionInformation[0]); RawWrite(h);
+        RawWrite(" av-target="); RawHex(h, ep->ExceptionRecord->ExceptionInformation[1]); RawWrite(h);
+    }
+    RawWrite("\r\n");
+    CONTEXT c = *ep->ContextRecord;
+    for (int i = 0; i < 40; ++i) {
+        ULONG64 pc = c.Rip;
+        RawAddr(a, pc);
+        strcpy(line, "CRASH frame#"); RawHex(h, i); strcat(line, h); strcat(line, " "); strcat(line, a); strcat(line, "\r\n");
+        RawWrite(line);
+        ULONG64 base = 0;
+        PRUNTIME_FUNCTION rf = RtlLookupFunctionEntry(pc, &base, NULL);
+        if (!rf) { c.Rip = *(ULONG64*)c.Rsp; c.Rsp += 8; }
+        else { PVOID hd = NULL; ULONG64 ef = 0; RtlVirtualUnwind(UNW_FLAG_NHANDLER, base, pc, rf, &c, &hd, &ef, NULL); }
+        if (!c.Rip) break;
+    }
+    TerminateProcess(GetCurrentProcess(), 0xC0000005);
+    return EXCEPTION_CONTINUE_SEARCH;
 }
 
 // ---------------------------------------------------------------- inversion
@@ -271,8 +310,14 @@ int main(int argc, char** argv) {
         else if (!strcmp(argv[i], "--log") && i + 1 < argc) log = W(argv[++i]);
         else pos.push_back(argv[i]);
     }
-    SetUnhandledExceptionFilter(CrashFilter);
+    g_out = GetStdHandle(STD_OUTPUT_HANDLE);
+    AddVectoredExceptionHandler(1, CrashHandler);
     if (!dll.empty() && !StartDetector(dll.c_str(), log.c_str())) return 1;
+    SnapshotModules();
+    Say("MODULES %d main_tid=%lu", g_modCount, GetCurrentThreadId());
+    for (int i = 0; i < g_modCount; ++i)
+        if (!_stricmp(g_mods[i].name, "LockDetector.dll") || !_stricmp(g_mods[i].name, "InversionDemo.exe"))
+            Say("MODULE %s base=%p size=%llu", g_mods[i].name, (void*)g_mods[i].base, (unsigned long long)g_mods[i].size);
 
     int rc = 0;
     if      (scenario == "inversion-cs")    ScenarioInversion("cs", false);

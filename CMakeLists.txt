@@ -41,6 +41,9 @@ add_library(LockDetector SHARED
 target_compile_definitions(LockDetector PRIVATE
   _WIN32_WINNT=0x0601 WIN32_LEAN_AND_MEAN UNICODE _UNICODE)
 target_link_libraries(LockDetector PRIVATE detours)
+if(MSVC)
+  target_link_options(LockDetector PRIVATE /MAP)
+endif()
 
 add_executable(LockViewer WIN32 LockViewer/LockViewer.cpp)
 target_compile_definitions(LockViewer PRIVATE WIN32_LEAN_AND_MEAN UNICODE _UNICODE)
@@ -51,4 +54,4 @@ endif()
 
 add_executable(InversionDemo Examples/InversionDemo/InversionDemo.cpp)
 target_compile_definitions(InversionDemo PRIVATE _WIN32_WINNT=0x0601 WIN32_LEAN_AND_MEAN)
-target_link_libraries(InversionDemo PRIVATE dbghelp)
+
