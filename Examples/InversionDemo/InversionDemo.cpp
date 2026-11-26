@@ -159,7 +159,9 @@ static DWORD WINAPI Watchdog(LPVOID) {
     TerminateProcess(GetCurrentProcess(), 4);
     return 0;
 }
+static volatile LONG g_probing = 0;   // set while an expected access violation is probed under SEH
 static LONG CALLBACK CrashHandler(EXCEPTION_POINTERS* ep) {
+    if (g_probing) return EXCEPTION_CONTINUE_SEARCH;
     DWORD code = ep->ExceptionRecord->ExceptionCode;
     if (code != EXCEPTION_ACCESS_VIOLATION && code != EXCEPTION_ILLEGAL_INSTRUCTION &&
         code != EXCEPTION_STACK_OVERFLOW && code != EXCEPTION_IN_PAGE_ERROR &&
@@ -391,13 +393,38 @@ typedef int (__cdecl *PFN_MInit)(void**, int);
 typedef int (__cdecl *PFN_MOp)(void*);
 static PFN_MInit mInit; static PFN_MOp mLock, mUnlock;
 static void *mA, *mB, *mR;
+static const int kFlagCand[] = { 0x02, 0x00, 0x01, 0x03, 0x04, 0x06, 0x100, 0x102, 0x101, 0x103 };
+static const int kFlagN = (int)(sizeof(kFlagCand) / sizeof(kFlagCand[0]));
+static bool g_flagOk[16];
+static int g_mflagPlain = -1, g_mflagRec = -1;
+
+// init + lock + unlock one mutex created with 'flags'; an access violation counts as "not accepted"
+static bool ProbeFlags(int flags) {
+    void* m = NULL; bool ok = false;
+    g_probing = 1;
+#ifdef _MSC_VER
+    __try { if (mInit(&m, flags) == 0 && m) { mLock(m); mUnlock(m); ok = true; } }
+    __except (EXCEPTION_EXECUTE_HANDLER) { ok = false; }
+#else
+    if (mInit(&m, flags) == 0 && m) { mLock(m); mUnlock(m); ok = true; }
+#endif
+    g_probing = 0;
+    return ok;
+}
 static bool Msvcp120Load() {
     HMODULE h = LoadLibraryW(L"msvcp120.dll");
     if (!h) return false;
     mInit   = (PFN_MInit)GetProcAddress(h, "_Mtx_init");
     mLock   = (PFN_MOp)GetProcAddress(h, "_Mtx_lock");
     mUnlock = (PFN_MOp)GetProcAddress(h, "_Mtx_unlock");
-    return mInit && mLock && mUnlock;
+    if (!(mInit && mLock && mUnlock)) return false;
+    // runs BEFORE the detector starts so a probed crash cannot leave tracker state behind
+    for (int i = 0; i < kFlagN; ++i) {
+        g_flagOk[i] = ProbeFlags(kFlagCand[i]);
+        if (g_flagOk[i] && !(kFlagCand[i] & 0x100) && g_mflagPlain < 0) g_mflagPlain = kFlagCand[i];
+        if (g_flagOk[i] &&  (kFlagCand[i] & 0x100) && g_mflagRec   < 0) g_mflagRec   = kFlagCand[i];
+    }
+    return true;
 }
 static DWORD WINAPI M120AB(LPVOID) { mLock(mA); mLock(mB); mUnlock(mB); mUnlock(mA); return 0; }
 static DWORD WINAPI M120BA(LPVOID) { mLock(mB); mLock(mA); mUnlock(mA); mUnlock(mB); return 0; }
@@ -421,11 +448,14 @@ static int ScenarioMtx120Dump() {
         for (int k = 0; k < 16 && p; ++k) { static const char* d = "0123456789ABCDEF"; hex[k*3] = d[p[k] >> 4]; hex[k*3+1] = d[p[k] & 15]; hex[k*3+2] = ' '; }
         Say("BYTES %-15s rva=0x%llX : %s", names[i], (unsigned long long)((const unsigned char*)p - (const unsigned char*)h), hex);
     }
+    for (int i = 0; i < kFlagN; ++i) Say("PROBE _Mtx_init flags=0x%X : %s", kFlagCand[i], g_flagOk[i] ? "works" : "ACCESS VIOLATION");
     return 0;
 }
 static int ScenarioMsvcp120(const std::string& scenario) {
     // _Mtx_plain(1) | _Mtx_try(2), recursive adds 0x100
-    mInit(&mA, 0x03); mInit(&mB, 0x03); mInit(&mR, 0x103);
+    if (g_mflagPlain < 0 || g_mflagRec < 0) { Say("ERROR no working _Mtx_init flag value found (plain=%d rec=%d)", g_mflagPlain, g_mflagRec); return 78; }
+    Say("MTX120 flags plain=0x%X recursive=0x%X", g_mflagPlain, g_mflagRec);
+    mInit(&mA, g_mflagPlain); mInit(&mB, g_mflagPlain); mInit(&mR, g_mflagRec);
     if (scenario == "recursive-mtx120") Say("LOCKS A=%p B=%p", mR, mB);
     else                                Say("LOCKS A=%p B=%p", mA, mB);
     if (scenario == "inversion-mtx120")  { RunAndJoin(M120AB); RunAndJoin(M120BA); }
