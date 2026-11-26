@@ -390,6 +390,9 @@ static int ScenarioEdges(int n, int rounds) {
 // as an inlined VS2013 std::mutex::lock() would. No v120 compiler is needed. msvcp120.dll
 // must be loaded BEFORE the detector starts (hooks only attach to already loaded DLLs).
 typedef int (__cdecl *PFN_MInit)(void**, int);
+// VS2013 ABI (confirmed from the disassembly of msvcp120.dll: _Mtx_unlock starts with
+// `mov rax,[rcx]`): every _Mtx_* function takes a POINTER TO the _Mtx_t handle, i.e. the
+// address of the _Mtx member inside the std::mutex object.
 typedef int (__cdecl *PFN_MOp)(void*);
 static PFN_MInit mInit; static PFN_MOp mLock, mUnlock;
 static void *mA, *mB, *mR;
@@ -403,10 +406,10 @@ static bool ProbeFlags(int flags) {
     void* m = NULL; bool ok = false;
     g_probing = 1;
 #ifdef _MSC_VER
-    __try { if (mInit(&m, flags) == 0 && m) { mLock(m); mUnlock(m); ok = true; } }
+    __try { if (mInit(&m, flags) == 0 && m) { mLock(&m); mUnlock(&m); ok = true; } }
     __except (EXCEPTION_EXECUTE_HANDLER) { ok = false; }
 #else
-    if (mInit(&m, flags) == 0 && m) { mLock(m); mUnlock(m); ok = true; }
+    if (mInit(&m, flags) == 0 && m) { mLock(&m); mUnlock(&m); ok = true; }
 #endif
     g_probing = 0;
     return ok;
@@ -426,16 +429,16 @@ static bool Msvcp120Load() {
     }
     return true;
 }
-static DWORD WINAPI M120AB(LPVOID) { mLock(mA); mLock(mB); mUnlock(mB); mUnlock(mA); return 0; }
-static DWORD WINAPI M120BA(LPVOID) { mLock(mB); mLock(mA); mUnlock(mA); mUnlock(mB); return 0; }
-static DWORD WINAPI M120Rec(LPVOID) { mLock(mR); mLock(mR); mLock(mB); mUnlock(mB); mUnlock(mR); mUnlock(mR); return 0; }
+static DWORD WINAPI M120AB(LPVOID) { mLock(&mA); mLock(&mB); mUnlock(&mB); mUnlock(&mA); return 0; }
+static DWORD WINAPI M120BA(LPVOID) { mLock(&mB); mLock(&mA); mUnlock(&mA); mUnlock(&mB); return 0; }
+static DWORD WINAPI M120Rec(LPVOID) { mLock(&mR); mLock(&mR); mLock(&mB); mUnlock(&mB); mUnlock(&mR); mUnlock(&mR); return 0; }
 static DWORD WINAPI M120Dl1(LPVOID) {
-    mLock(mA); InterlockedIncrement(&g_ready); while (g_ready < 2) Sleep(1); Sleep(50);
-    mLock(mB); mUnlock(mB); mUnlock(mA); return 0;
+    mLock(&mA); InterlockedIncrement(&g_ready); while (g_ready < 2) Sleep(1); Sleep(50);
+    mLock(&mB); mUnlock(&mB); mUnlock(&mA); return 0;
 }
 static DWORD WINAPI M120Dl2(LPVOID) {
-    mLock(mB); InterlockedIncrement(&g_ready); while (g_ready < 2) Sleep(1); Sleep(50);
-    mLock(mA); mUnlock(mA); mUnlock(mB); return 0;
+    mLock(&mB); InterlockedIncrement(&g_ready); while (g_ready < 2) Sleep(1); Sleep(50);
+    mLock(&mA); mUnlock(&mA); mUnlock(&mB); return 0;
 }
 
 static int ScenarioMtx120Dump() {
@@ -456,8 +459,8 @@ static int ScenarioMsvcp120(const std::string& scenario) {
     if (g_mflagPlain < 0 || g_mflagRec < 0) { Say("ERROR no working _Mtx_init flag value found (plain=%d rec=%d)", g_mflagPlain, g_mflagRec); return 78; }
     Say("MTX120 flags plain=0x%X recursive=0x%X", g_mflagPlain, g_mflagRec);
     mInit(&mA, g_mflagPlain); mInit(&mB, g_mflagPlain); mInit(&mR, g_mflagRec);
-    if (scenario == "recursive-mtx120") Say("LOCKS A=%p B=%p", mR, mB);
-    else                                Say("LOCKS A=%p B=%p", mA, mB);
+    if (scenario == "recursive-mtx120") Say("LOCKS A=%p B=%p", (void*)&mR, (void*)&mB);
+    else                                Say("LOCKS A=%p B=%p", (void*)&mA, (void*)&mB);
     if (scenario == "inversion-mtx120")  { RunAndJoin(M120AB); RunAndJoin(M120BA); }
     else if (scenario == "consistent-mtx120") { RunAndJoin(M120AB); RunAndJoin(M120AB); }
     else if (scenario == "recursive-mtx120")  { RunAndJoin(M120Rec); RunAndJoin(M120Rec); }
