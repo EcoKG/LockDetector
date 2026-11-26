@@ -95,14 +95,28 @@ $r = Run-Demo @('deadlock') 'deadlock-detector' -Detector
 $w = Warnings-For $r
 Check "deadlock : detector reports cycle while the threads are really blocked (exit 3 = hang confirmed)" ($w.Count -ge 1 -and $r.Exit -eq 3) "(exit=$($r.Exit) matching=$($w.Count) allWarnings=$((Warnings-All $r).Count) logBytes=$($r.LogSize))"
 
-Write-Host "`n==== 3b. std::mutex (opposite order, threads do not overlap) ===="
-foreach ($e in @(@('InversionDemo.exe','/MD (std::mutex via msvcp140.dll)'), @('InversionDemoMT.exe','/MT (std::mutex compiled into the exe)'))) {
+Write-Host "`n==== 3b. std::mutex ===="
+foreach ($e in @(@('InversionDemo.exe','/MD'), @('InversionDemoMT.exe','/MT'))) {
     $exe = Join-Path $BinDir $e[0]
-    $r = Run-Demo @('inversion-stdmutex') ("stdmutex-" + $e[0]) -Detector -Exe $exe
+    $lbl = "std::mutex " + $e[1]
+    $r = Run-Demo @('inversion-stdmutex') ("stdmutex-inv-" + $e[0]) -Detector -Exe $exe
     $n = (Warnings-All $r).Count
-    Check ("std::mutex " + $e[1] + " : detector reports the inversion") ($n -ge 1) "(exit=$($r.Exit) allWarnings=$n logBytes=$($r.LogSize))"
+    Check "$lbl inversion: detector reports it" ($n -ge 1 -and $r.Exit -eq 0) "(exit=$($r.Exit) allWarnings=$n)"
     $r.Stdout -split "`r?`n" | Where-Object { $_ -match '^LOCKS' } | ForEach-Object { Write-Host "  $_" }
     (Warnings-All $r) | Select-Object -First 2 | ForEach-Object { Write-Host "  $_" }
+    ($r.Log -split "`r?`n" | Where-Object { $_ -match 'STL|msvcp' }) | ForEach-Object { Write-Host "  $_" }
+
+    $r = Run-Demo @('consistent-stdmutex') ("stdmutex-cons-" + $e[0]) -Detector -Exe $exe
+    $n = (Warnings-All $r).Count
+    Check "$lbl consistent order: no warning" ($n -eq 0 -and $r.Exit -eq 0) "(exit=$($r.Exit) allWarnings=$n)"
+
+    $r = Run-Demo @('recursive-stdmutex') ("stdmutex-rec-" + $e[0]) -Detector -Exe $exe
+    $n = (Warnings-All $r).Count
+    Check "$lbl recursive_mutex re-lock: no warning" ($n -eq 0 -and $r.Exit -eq 0) "(exit=$($r.Exit) allWarnings=$n)"
+
+    $r = Run-Demo @('deadlock-stdmutex') ("stdmutex-dl-" + $e[0]) -Detector -Exe $exe
+    $n = (Warnings-All $r).Count
+    Check "$lbl real deadlock: warning logged while blocked" ($n -ge 1 -and $r.Exit -eq 3) "(exit=$($r.Exit) allWarnings=$n)"
 }
 
 Write-Host "`n==== 4. benchmark (ns per lock+unlock, wall time / iters per thread) ===="

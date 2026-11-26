@@ -222,9 +222,99 @@ static BOOLEAN WINAPI HookTrySh(PSRWLOCK p) {
     return r;
 }
 
+
+// ---- STL mutex in msvcp140.dll (_Mtx_*) ---------------------------------------------------
+// With the dynamic CRT (/MD) std::mutex::lock() is a call into msvcp140.dll, which then calls
+// AcquireSRWLockExclusive from inside that system DLL, so the caller filter ignores it.
+// Hooking the exported _Mtx_* entry points instead sees the call coming from application code.
+// The lock identity is the _Mtx_t argument (it points into the std::mutex object).
+typedef int (__cdecl *PFN_MtxLock)(void*);
+typedef int (__cdecl *PFN_MtxTimedLock)(void*, const void*);
+typedef void (__cdecl *PFN_MtxDestroy)(void*);
+
+template<int M> struct StlMtx {
+    static PFN_MtxLock RealLock, RealTry, RealUnlock;
+    static PFN_MtxTimedLock RealTimed;
+    static PFN_MtxDestroy RealDestroy;
+
+    static int __cdecl Lock(void* m) {
+        void* ra = _ReturnAddress();
+        DWORD e0 = GetLastError();
+        LD_Thread* t = LD_Begin(ra);
+        if (t) LD_BeforeAcquire(t, m, LD_STL_WRAPPER, "_Mtx_lock");
+        SetLastError(e0);
+        int r = RealLock(m);
+        if (t) { DWORD e1 = GetLastError(); if (r == 0) LD_AfterAcquire(t, m, LD_STL_WRAPPER, "_Mtx_lock", false); LD_End(t); SetLastError(e1); }
+        return r;
+    }
+    static int __cdecl Try(void* m) {
+        void* ra = _ReturnAddress();
+        DWORD e0 = GetLastError();
+        LD_Thread* t = LD_Begin(ra);
+        SetLastError(e0);
+        int r = RealTry(m);
+        if (t) { DWORD e1 = GetLastError(); if (r == 0) LD_AfterAcquire(t, m, LD_STL_WRAPPER, "_Mtx_trylock", true); LD_End(t); SetLastError(e1); }
+        return r;
+    }
+    static int __cdecl Timed(void* m, const void* abs) {
+        void* ra = _ReturnAddress();
+        DWORD e0 = GetLastError();
+        LD_Thread* t = LD_Begin(ra);
+        if (t) LD_BeforeAcquire(t, m, LD_STL_WRAPPER, "_Mtx_timedlock");
+        SetLastError(e0);
+        int r = RealTimed(m, abs);
+        if (t) { DWORD e1 = GetLastError(); if (r == 0) LD_AfterAcquire(t, m, LD_STL_WRAPPER, "_Mtx_timedlock", false); LD_End(t); SetLastError(e1); }
+        return r;
+    }
+    static int __cdecl Unlock(void* m) {
+        void* ra = _ReturnAddress();
+        DWORD e0 = GetLastError();
+        LD_Thread* t = LD_Begin(ra);
+        if (t) { LD_Release(t, m, LD_STL_WRAPPER, "_Mtx_unlock"); LD_End(t); }
+        SetLastError(e0);
+        return RealUnlock(m);
+    }
+    static void __cdecl Destroy(void* m) {
+        void* ra = _ReturnAddress();
+        DWORD e0 = GetLastError();
+        LD_Thread* t = LD_Begin(ra);
+        if (t) { LD_ObjectDestroyed(m, LD_STL_WRAPPER); LD_End(t); }
+        SetLastError(e0);
+        RealDestroy(m);
+    }
+    // returns how many of the 5 entry points were attached
+    static int Attach(HMODULE h) {
+        RealLock    = (PFN_MtxLock)GetProcAddress(h, "_Mtx_lock");
+        RealTry     = (PFN_MtxLock)GetProcAddress(h, "_Mtx_trylock");
+        RealTimed   = (PFN_MtxTimedLock)GetProcAddress(h, "_Mtx_timedlock");
+        RealUnlock  = (PFN_MtxLock)GetProcAddress(h, "_Mtx_unlock");
+        RealDestroy = (PFN_MtxDestroy)GetProcAddress(h, "_Mtx_destroy_in_situ");
+        int n = 0;
+        if (RealLock)    { DetourAttach(&(PVOID&)RealLock, Lock); ++n; }
+        if (RealTry)     { DetourAttach(&(PVOID&)RealTry, Try); ++n; }
+        if (RealTimed)   { DetourAttach(&(PVOID&)RealTimed, Timed); ++n; }
+        if (RealUnlock)  { DetourAttach(&(PVOID&)RealUnlock, Unlock); ++n; }
+        if (RealDestroy) { DetourAttach(&(PVOID&)RealDestroy, Destroy); ++n; }
+        return n;
+    }
+    static void Detach() {
+        if (RealLock)    DetourDetach(&(PVOID&)RealLock, Lock);
+        if (RealTry)     DetourDetach(&(PVOID&)RealTry, Try);
+        if (RealTimed)   DetourDetach(&(PVOID&)RealTimed, Timed);
+        if (RealUnlock)  DetourDetach(&(PVOID&)RealUnlock, Unlock);
+        if (RealDestroy) DetourDetach(&(PVOID&)RealDestroy, Destroy);
+    }
+};
+template<int M> PFN_MtxLock StlMtx<M>::RealLock = NULL;
+template<int M> PFN_MtxLock StlMtx<M>::RealTry = NULL;
+template<int M> PFN_MtxLock StlMtx<M>::RealUnlock = NULL;
+template<int M> PFN_MtxTimedLock StlMtx<M>::RealTimed = NULL;
+template<int M> PFN_MtxDestroy StlMtx<M>::RealDestroy = NULL;
+
 // ---- install / remove -----------------------------------------------------------------------------
 // Detours only fixes up threads it was told about. Register every thread of the process so
 // none of them can be executing inside a function while its first bytes are rewritten.
+static int g_stlAttached[2] = { 0, 0 };
 static HANDLE g_updated[1024];
 static int g_updatedCount = 0;
 static void UpdateAllThreads() {
@@ -252,6 +342,10 @@ static void ReleaseUpdatedThreads() {
 }
 
 BOOL LD_InstallHooks() {
+    // only DLLs that are already loaded can be hooked; msvcp140d.dll is the debug CRT
+    HMODULE stl0 = GetModuleHandleW(L"msvcp140.dll");
+    HMODULE stl1 = GetModuleHandleW(L"msvcp140d.dll");
+    int n0 = 0, n1 = 0;
     DetourTransactionBegin();
     UpdateAllThreads();
     DetourAttach(&(PVOID&)RealEnterCS, HookEnterCS);
@@ -270,8 +364,18 @@ BOOL LD_InstallHooks() {
     DetourAttach(&(PVOID&)RealReleaseSh, HookReleaseSh);
     DetourAttach(&(PVOID&)RealTryEx, HookTryEx);
     DetourAttach(&(PVOID&)RealTrySh, HookTrySh);
+    if (stl0) n0 = StlMtx<0>::Attach(stl0);
+    if (stl1) n1 = StlMtx<1>::Attach(stl1);
     LONG rc = DetourTransactionCommit();
     ReleaseUpdatedThreads();
+    g_stlAttached[0] = (rc == NO_ERROR) ? n0 : 0;
+    g_stlAttached[1] = (rc == NO_ERROR) ? n1 : 0;
+    if (rc == NO_ERROR) {
+        LD_LogMessage("INFO", stl0 ? (n0 == 5 ? "STL std::mutex hooks active (msvcp140.dll _Mtx_*: 5/5)"
+                                              : "STL std::mutex hooks PARTIAL (msvcp140.dll _Mtx_* missing exports)")
+                                   : "msvcp140.dll not loaded: only statically linked std::mutex is tracked");
+        if (stl1) LD_LogMessage("INFO", "msvcp140d.dll (debug CRT) std::mutex hooks attached");
+    }
     return rc == NO_ERROR;
 }
 
@@ -294,6 +398,8 @@ void LD_RemoveHooks() {
     DetourDetach(&(PVOID&)RealReleaseSh, HookReleaseSh);
     DetourDetach(&(PVOID&)RealTryEx, HookTryEx);
     DetourDetach(&(PVOID&)RealTrySh, HookTrySh);
+    if (g_stlAttached[0]) StlMtx<0>::Detach();
+    if (g_stlAttached[1]) StlMtx<1>::Detach();
     DetourTransactionCommit();
     ReleaseUpdatedThreads();
 }

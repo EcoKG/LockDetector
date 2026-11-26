@@ -216,10 +216,43 @@ static DWORD WINAPI SrwShBA(LPVOID) {
     AcquireSRWLockShared(&srwB); AcquireSRWLockShared(&srwA);
     ReleaseSRWLockShared(&srwA); ReleaseSRWLockShared(&srwB); return 0;
 }
+extern volatile LONG g_ready;
 static std::mutex smA, smB;
 static DWORD WINAPI StdAB(LPVOID) { smA.lock(); smB.lock(); smB.unlock(); smA.unlock(); return 0; }
 static DWORD WINAPI StdBA(LPVOID) { smB.lock(); smA.lock(); smA.unlock(); smB.unlock(); return 0; }
+static std::recursive_mutex smR;
+static DWORD WINAPI StdRecursive(LPVOID) {   // recursive lock of one mutex, then another: must not warn
+    smR.lock(); smR.lock(); smB.lock(); smB.unlock(); smR.unlock(); smR.unlock(); return 0;
+}
+static DWORD WINAPI StdDlT1(LPVOID) {
+    smA.lock(); InterlockedIncrement(&g_ready); while (g_ready < 2) Sleep(1); Sleep(50);
+    smB.lock(); smB.unlock(); smA.unlock(); return 0;
+}
+static DWORD WINAPI StdDlT2(LPVOID) {
+    smB.lock(); InterlockedIncrement(&g_ready); while (g_ready < 2) Sleep(1); Sleep(50);
+    smA.lock(); smA.unlock(); smB.unlock(); return 0;
+}
 static void ScenarioInversion(const char* kind, bool consistent) {
+    if (!strcmp(kind, "std-consistent")) {
+        Say("LOCKS A=%p B=%p", (void*)&smA, (void*)&smB);
+        RunAndJoin(StdAB); RunAndJoin(StdAB);
+        Say("RESULT scenario-finished");
+        return;
+    }
+    if (!strcmp(kind, "std-recursive")) {
+        Say("LOCKS A=%p B=%p", (void*)&smR, (void*)&smB);
+        RunAndJoin(StdRecursive); RunAndJoin(StdRecursive);
+        Say("RESULT scenario-finished");
+        return;
+    }
+    if (!strcmp(kind, "std-deadlock")) {
+        Say("LOCKS A=%p B=%p", (void*)&smA, (void*)&smB);
+        HANDLE h[2] = { Spawn(StdDlT1, NULL), Spawn(StdDlT2, NULL) };
+        DWORD r = WaitForMultipleObjects(2, h, TRUE, 3000);
+        if (r == WAIT_TIMEOUT) { Say("RESULT deadlock-confirmed"); TerminateProcess(GetCurrentProcess(), 3); }
+        Say("RESULT no-deadlock r=%lu", r);
+        return;
+    }
     if (!strcmp(kind, "std")) {          // std::mutex, opposite order, threads do not overlap
         Say("LOCKS A=%p B=%p", (void*)&smA, (void*)&smB);
         RunAndJoin(StdAB);
@@ -253,7 +286,7 @@ static void ScenarioInversion(const char* kind, bool consistent) {
 }
 
 // ----------------------------------------------------------------- deadlock
-static volatile LONG g_ready = 0;
+volatile LONG g_ready = 0;
 static DWORD WINAPI DlT1(LPVOID) {
     EnterCriticalSection(&csA);
     InterlockedIncrement(&g_ready);
@@ -389,6 +422,9 @@ int main(int argc, char** argv) {
     else if (scenario == "consistent-order")ScenarioInversion("cs", true);
     else if (scenario == "srw-shared-only") ScenarioInversion("srw-shared", false);
     else if (scenario == "inversion-stdmutex") ScenarioInversion("std", false);
+    else if (scenario == "consistent-stdmutex") ScenarioInversion("std-consistent", false);
+    else if (scenario == "recursive-stdmutex") ScenarioInversion("std-recursive", false);
+    else if (scenario == "deadlock-stdmutex") ScenarioInversion("std-deadlock", false);
     else if (scenario == "deadlock")        rc = ScenarioDeadlock();
     else if (scenario == "thread-trivial") {   // just create + join one empty thread
         HANDLE h = Spawn([](LPVOID) -> DWORD { return 0; }, NULL);
