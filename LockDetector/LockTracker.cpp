@@ -32,7 +32,8 @@ enum {
     CACHE_CAP   = 4096,
     MUTEX_CAP   = 1 << 14,
     RING_SIZE   = 1 << 22,
-    DRAIN_CHUNK = 1 << 20
+    DRAIN_CHUNK = 1 << 20,
+    RING_RESERVE = 1 << 18      // headroom only WARNING/ERROR lines may use
 };
 static const u32 SLOT_TOMB = 0xFFFFFFFFu;
 enum { MODE_EX = 0, MODE_SH = 1 };
@@ -124,10 +125,13 @@ static void PutHeader(Out& o, const char* level) {
 }
 
 // ---- ring buffer -> writer thread -----------------------------------------------------
-static void EmitLine(const char* line, size_t len) {
+// Verbose INFO traffic can outrun the writer thread and is dropped (counted in 'dropped').
+// WARNING/ERROR lines (critical) may also use the reserved headroom so they are not lost.
+static void EmitLine(const char* line, size_t len, bool critical) {
     if (!g_ring || !len) return;
     SpinLock(&g_ringLock);
-    if ((u64)RING_SIZE - (g_rhead - g_rtail) < len) {
+    u64 reserve = critical ? 0 : (u64)RING_RESERVE;
+    if ((u64)RING_SIZE - (g_rhead - g_rtail) < len + reserve) {
         InterlockedIncrement(&g_nDropped);
     } else {
         for (size_t i = 0; i < len; ++i) g_ring[(g_rhead + i) & (RING_SIZE - 1)] = line[i];
@@ -135,9 +139,9 @@ static void EmitLine(const char* line, size_t len) {
     }
     SpinUnlock(&g_ringLock);
 }
-static void Finish(char* base, Out& o) {
+static void Finish(char* base, Out& o, bool critical = false) {
     PutS(o, "\r\n");
-    EmitLine(base, (size_t)(o.p - base));
+    EmitLine(base, (size_t)(o.p - base), critical);
 }
 
 static DWORD WINAPI WriterProc(LPVOID) {
@@ -189,7 +193,7 @@ static u32 GetNode(void* obj, u32 cls, bool create) {
                     g_nodeFullReported = true;
                     char buf[LD_MAX_LINE]; Out o = { buf, buf + sizeof(buf) - 4 };
                     PutHeader(o, "WARNING"); PutS(o, "node table full: new locks are no longer tracked");
-                    Finish(buf, o);
+                    Finish(buf, o, true);
                 }
                 return 0;
             }
@@ -220,7 +224,7 @@ static bool AddEdge(u32 from, u32 to) {
             g_edgeFullReported = true;
             char buf[LD_MAX_LINE]; Out o = { buf, buf + sizeof(buf) - 4 };
             PutHeader(o, "WARNING"); PutS(o, "edge table full: new lock-order edges are no longer recorded");
-            Finish(buf, o);
+            Finish(buf, o, true);
         }
         return false;
     }
@@ -259,7 +263,7 @@ static void ReportCycle(u32 held, u32 wanted, u32 len, const char* op) {
     }
     if (len > 12) PutS(o, "... -> ");
     PutPtr(o, g_nodes[wanted].obj); PutS(o, "("); PutS(o, KindName(g_nodes[wanted].kind)); PutS(o, ")");
-    Finish(buf, o);
+    Finish(buf, o, true);
     InterlockedIncrement(&g_nWarn);
 }
 
@@ -501,7 +505,7 @@ void LD_LogMessage(const char* level, const char* message) {
     char buf[LD_MAX_LINE]; Out o = { buf, buf + sizeof(buf) - 4 };
     PutHeader(o, level);
     PutS(o, message);
-    Finish(buf, o);
+    Finish(buf, o, level[0] != 'I');
 }
 
 void LD_LogStats() {
@@ -512,7 +516,7 @@ void LD_LogStats() {
     PutS(o, " warnings="); PutDec(o, (u64)g_nWarn);
     PutS(o, " events="); PutDec(o, (u64)g_nEvents);
     PutS(o, " dropped="); PutDec(o, (u64)g_nDropped);
-    Finish(buf, o);
+    Finish(buf, o, true);
 }
 
 // ---- original API (kept for compatibility / STL wrapper strategy) ---------------------------------------
