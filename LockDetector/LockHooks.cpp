@@ -3,6 +3,7 @@
 #include <detours.h>
 #include <intrin.h>
 #include <tlhelp32.h>
+#include <stdio.h>
 
 // Every hook follows the same shape:
 //   1. remember GetLastError (the tracker must not disturb the caller's error state)
@@ -282,6 +283,20 @@ template<int M> struct StlMtx {
         SetLastError(e0);
         RealDestroy(m);
     }
+    // attach one entry point and log the Detours result (the real function pointer is
+    // replaced by the trampoline on success)
+    static int Try1(const char* name, PVOID* real, PVOID hook) {
+        if (!*real) return 0;
+        LONG rc = DetourAttach(real, hook);
+        if (rc != NO_ERROR) {
+            char buf[160];
+            sprintf_s(buf, "STL hook attach FAILED: %s rc=%ld (module slot %d)", name, (long)rc, M);
+            LD_LogMessage("WARNING", buf);
+            *real = NULL;
+            return 0;
+        }
+        return 1;
+    }
     // returns how many of the 5 entry points were attached
     static int Attach(HMODULE h) {
         RealLock    = (PFN_MtxLock)GetProcAddress(h, "_Mtx_lock");
@@ -291,11 +306,11 @@ template<int M> struct StlMtx {
         RealDestroy = (PFN_MtxDestroy)GetProcAddress(h, "_Mtx_destroy_in_situ");
         if (!RealDestroy) RealDestroy = (PFN_MtxDestroy)GetProcAddress(h, "_Mtx_destroy");   // VS2012/2013 name
         int n = 0;
-        if (RealLock)    { DetourAttach(&(PVOID&)RealLock, Lock); ++n; }
-        if (RealTry)     { DetourAttach(&(PVOID&)RealTry, Try); ++n; }
-        if (RealTimed)   { DetourAttach(&(PVOID&)RealTimed, Timed); ++n; }
-        if (RealUnlock)  { DetourAttach(&(PVOID&)RealUnlock, Unlock); ++n; }
-        if (RealDestroy) { DetourAttach(&(PVOID&)RealDestroy, Destroy); ++n; }
+        n += Try1("_Mtx_lock",            (PVOID*)&RealLock,    (PVOID)Lock);
+        n += Try1("_Mtx_trylock",         (PVOID*)&RealTry,     (PVOID)Try);
+        n += Try1("_Mtx_timedlock",       (PVOID*)&RealTimed,   (PVOID)Timed);
+        n += Try1("_Mtx_unlock",          (PVOID*)&RealUnlock,  (PVOID)Unlock);
+        n += Try1("_Mtx_destroy[_in_situ]", (PVOID*)&RealDestroy, (PVOID)Destroy);
         return n;
     }
     static void Detach() {

@@ -122,6 +122,12 @@ foreach ($e in @(@('InversionDemo.exe','/MD'), @('InversionDemoMT.exe','/MT'))) 
 
 Write-Host "`n==== 3c. VS2013 (v120) std::mutex path: msvcp120.dll _Mtx_* ===="
 $m120 = Join-Path $BinDir 'InversionDemo.exe'
+$r = Run-Demo @('mtx120-dump') 'mtx120-dump'
+Write-Host ($r.Stdout.Trim())
+foreach ($sc in 'inversion-mtx120','deadlock-mtx120') {
+    $r = Run-Demo @($sc) "mtx120-plain-$sc"
+    if ($r.Exit -ne 77) { Check "v120 $sc WITHOUT detector behaves (inversion: exit 0, deadlock: exit 3)" (($sc -like 'deadlock*' -and $r.Exit -eq 3) -or ($sc -like 'inversion*' -and $r.Exit -eq 0)) "(exit=$($r.Exit))" }
+}
 $r = Run-Demo @('inversion-mtx120') 'mtx120-inv' -Detector -Exe $m120
 if ($r.Exit -eq 77) {
     Write-Host "[SKIP] msvcp120.dll not available on this machine (install the VC++ 2013 x64 runtime)"

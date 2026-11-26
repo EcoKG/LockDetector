@@ -410,6 +410,19 @@ static DWORD WINAPI M120Dl2(LPVOID) {
     mLock(mB); InterlockedIncrement(&g_ready); while (g_ready < 2) Sleep(1); Sleep(50);
     mLock(mA); mUnlock(mA); mUnlock(mB); return 0;
 }
+
+static int ScenarioMtx120Dump() {
+    HMODULE h = GetModuleHandleW(L"msvcp120.dll");
+    Say("MSVCP120 base=%p", (void*)h);
+    const char* names[] = { "_Mtx_init", "_Mtx_lock", "_Mtx_unlock", "_Mtx_trylock", "_Mtx_timedlock", "_Mtx_destroy" };
+    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); ++i) {
+        const unsigned char* p = (const unsigned char*)GetProcAddress(h, names[i]);
+        char hex[16 * 3 + 1] = {0};
+        for (int k = 0; k < 16 && p; ++k) { static const char* d = "0123456789ABCDEF"; hex[k*3] = d[p[k] >> 4]; hex[k*3+1] = d[p[k] & 15]; hex[k*3+2] = ' '; }
+        Say("BYTES %-15s rva=0x%llX : %s", names[i], (unsigned long long)((const unsigned char*)p - (const unsigned char*)h), hex);
+    }
+    return 0;
+}
 static int ScenarioMsvcp120(const std::string& scenario) {
     // _Mtx_plain(1) | _Mtx_try(2), recursive adds 0x100
     mInit(&mA, 0x03); mInit(&mB, 0x03); mInit(&mR, 0x103);
@@ -455,6 +468,7 @@ int main(int argc, char** argv) {
         g_threads[0] = hm; g_threadCount = 1;
         CloseHandle(CreateThread(NULL, 0, Watchdog, NULL, 0, NULL));
     }
+    if (scenario == "mtx120-dump") { if (!Msvcp120Load()) { Say("SKIP msvcp120.dll not available"); return 77; } return ScenarioMtx120Dump(); }
     bool isM120 = scenario.size() > 7 && scenario.compare(scenario.size() - 7, 7, "-mtx120") == 0;
     if (isM120 && !Msvcp120Load()) { Say("SKIP msvcp120.dll (VC++ 2013 runtime) not available"); return 77; }
     if (!dll.empty() && !StartDetector(dll.c_str(), log.c_str())) return 1;
